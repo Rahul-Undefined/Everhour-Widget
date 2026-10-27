@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v8
+    EverhourWidget.ps1  -  v8.1
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.0"
+$Script:Version = "8.1"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -271,7 +271,8 @@ $Script:FontNames = @{}     # catalog key -> real family name inside the collect
 $Script:FamCache = @{}
 
 function Load-Fonts {
-    $dir = Join-Path $ScriptDir "fonts"
+    $dir = Join-Path $ScriptDir "assets\fonts"
+    if (-not (Test-Path $dir)) { $dir = Join-Path $ScriptDir "fonts" }
     if (-not (Test-Path $dir)) { return }
     foreach ($key in $Script:FontCatalog.Keys) {
         $e = $Script:FontCatalog[$key]
@@ -410,23 +411,54 @@ function Get-WidgetProcesses {
 $Script:AppFiles = @("EverhourWidget.ps1", "Start Everhour Widget.vbs", "Install Everhour Widget.vbs", "Stop Widget.bat",
                      "Test Autostart Now.bat", "Troubleshoot.bat", "READ ME FIRST.txt")
 
+# Fonts live in assets\fonts. (Up to v8.0 they were in .\fonts; older
+# updaters copy that folder over fonts the running widget has locked, and
+# fail - so the folder moved, and those updaters now skip it.)
+function Get-FontDir([string]$root) {
+    $a = Join-Path $root "assets\fonts"
+    if (Test-Path $a) { return $a }
+    return (Join-Path $root "fonts")
+}
+
+# Copy one file, skipping it when the target already has the same content.
+# Returns $false only when it really couldn't be written.
+function Copy-IfChanged([string]$src, [string]$dst) {
+    if (Test-Path $dst) {
+        try {
+            if ((Get-Item $src).Length -eq (Get-Item $dst).Length -and
+                (Get-FileHash $src -Algorithm SHA1).Hash -eq (Get-FileHash $dst -Algorithm SHA1).Hash) { return $true }
+        } catch { }
+    }
+    try { Copy-Item $src $dst -Force -ErrorAction Stop; return $true }
+    catch { Write-Log "Couldn't replace $(Split-Path $dst -Leaf): $($_.Exception.Message)"; return $false }
+}
+
+# Copies the widget; returns $true when the script itself is in place. A
+# font file the running widget holds open is left alone - it never changes.
 function Copy-AppFiles([string]$from, [string]$to) {
     New-Item -ItemType Directory -Force -Path $to | Out-Null
+    $ok = $true
     foreach ($f in $Script:AppFiles) {
         $src = Join-Path $from $f
-        if (Test-Path $src) { Copy-Item $src (Join-Path $to $f) -Force }
+        if (Test-Path $src) {
+            $copied = Copy-IfChanged $src (Join-Path $to $f)
+            if (-not $copied -and $f -eq "EverhourWidget.ps1") { $ok = $false }
+        }
     }
-    if (Test-Path (Join-Path $from "fonts")) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $to "fonts") | Out-Null
-        Copy-Item (Join-Path $from "fonts\*") (Join-Path $to "fonts") -Force
+    $fs = Get-FontDir $from
+    if (Test-Path $fs) {
+        $fd = Join-Path $to "assets\fonts"
+        New-Item -ItemType Directory -Force -Path $fd | Out-Null
+        foreach ($ff in Get-ChildItem $fs -File) { [void](Copy-IfChanged $ff.FullName (Join-Path $fd $ff.Name)) }
     }
+    return $ok
 }
 
 if ($BuildShare) {
     $shareRoot = Join-Path $ScriptDir "Share"
     $out = Join-Path $shareRoot "Everhour Widget"
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    Copy-AppFiles $ScriptDir $out
+    [void](Copy-AppFiles $ScriptDir $out)
     @"
 EVERHOUR WIDGET - HOW TO INSTALL
 ================================
@@ -459,7 +491,7 @@ if ($Setup) {
         if ($ScriptDir -ne $InstallDir) {
             foreach ($p in (Get-WidgetProcesses)) { try { Stop-Process -Id $p.ProcessId -Force } catch { } }
             Start-Sleep -Milliseconds 800
-            Copy-AppFiles $ScriptDir $InstallDir
+            [void](Copy-AppFiles $ScriptDir $InstallDir)
             # files copied from a download or zip carry "blocked" marks; clear them
             Get-ChildItem $InstallDir -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
         }
@@ -1604,8 +1636,9 @@ function On-UpdateDownloaded($r) {
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $src "EverhourWidget.ps1"), [ref]$tok, [ref]$errs)
     if ($errs.Count -gt 0) { Set-Toast "Update looks broken - skipped" 6 -IsError; Write-Log "Update skipped: downloaded script has $($errs.Count) parse errors"; return }
     try {
-        Copy-AppFiles $src $ScriptDir
+        $ok = Copy-AppFiles $src $ScriptDir
         Get-ChildItem $ScriptDir -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+        if (-not $ok) { throw "the widget script couldn't be replaced" }
     } catch { Set-Toast "Update failed" 6 -IsError; Write-Log "Update copy failed: $($_.Exception.Message)"; return }
     Write-Log "Updated from $($Script:Version) to $($Script:UpdateAvail.Version)"
     Restart-Widget

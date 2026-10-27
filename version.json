@@ -1,4 +1,4 @@
 {
-  "version": "8.0",
-  "notes": "Today and This week lists you can scroll and double-click to restart a task, smoother edge lights, see-through settings, update button on the widget, and the edge strip on every screen."
+  "version": "8.1",
+  "notes": "Fixes 'Update failed' when installing updates, plus Today and This week lists, double-click to restart a task, the update button on the widget, and the edge strip on every screen."
 }

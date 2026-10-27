@@ -118,7 +118,7 @@ Run **`Build Share Folder.bat`**. It creates `Share\Everhour Widget` and `Share\
 | `Stop Widget.bat` | Closes it for this session |
 | `Test Autostart Now.bat` | Proves it will start at login — no reboot needed |
 | `Troubleshoot.bat` | Checks the PC, autostart and your token; writes `troubleshoot-log.txt` |
-| `fonts/` | Open-source fonts (SIL OFL 1.1), loaded privately |
+| `assets/fonts/` | Open-source fonts (SIL OFL 1.1), loaded privately |
 
 Settings and the encrypted token live in `%APPDATA%\EverhourWidget\config.json`; errors go to `error.log` in the same folder.
 
