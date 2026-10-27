@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v8.1
+    EverhourWidget.ps1  -  v8.2
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.1"
+$Script:Version = "8.2"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -1683,7 +1683,7 @@ function Update-UiPalette {
     $UI.Sel     = Mix (Mix $back $toward 0.10) $acc 0.14
     $UI.Line    = Mix $back $toward $(if ($light) { 0.13 } else { 0.15 })
     $UI.Text    = $text
-    $UI.Muted   = Mix $idle $task 0.35
+    $UI.Muted   = Mix $idle $task 0.6
     $UI.Accent  = $acc
     $UI.AccentH = Mix $acc $toward 0.15
     $UI.Danger  = ToColor $c.ErrorColor
@@ -1742,7 +1742,7 @@ function Set-CaptureHidden($f, [switch]$Always) {
 
 # Settings and dialogs see-through like the widget, but never so faint the
 # text gets hard to read.
-function Get-DialogOpacity { return [Math]::Max(0.78, [Math]::Min(1.0, [double]$Script:Cfg.Opacity / 100.0)) }
+function Get-DialogOpacity { return [Math]::Max(0.9, [Math]::Min(1.0, [double]$Script:Cfg.Opacity / 100.0)) }
 
 function Set-DoubleBuffered($ctrl) {
     try {
@@ -3749,52 +3749,89 @@ function Build-Page-finish($p) {
     return "Done"
 }
 
+# Settings home: a live preview and a short list of categories, each its own
+# small page.
 function Build-Page-home($p) {
+    $y = 4
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 150 @("work")))
+    $y += 162
+    $rows = @(
+        @("Appearance", { "{0}  |  {1}" -f (Get-CurrentThemeName), $Script:Cfg.Shape }, "appearance"),
+        @("Widget", { $n = @("AlwaysOnTop", "HideFromCapture", "AutoHide", "Sounds") | Where-Object { $Script:Cfg[$_] }; "{0} on" -f @($n).Count }, "behaviour"),
+        @("Focus and breaks", { "{0} min focus  |  {1} min breaks" -f $Script:Cfg.FocusMinutes, $Script:Cfg.BreakLimitMinutes }, "focusbreaks"),
+        @("Work hours and reminders", { "{0}-{1}" -f $Script:Cfg.WorkStart, $Script:Cfg.WorkEnd }, "workday"),
+        @("Favourite tasks", { "{0} pinned" -f @(Get-Favs).Count }, "favourites"),
+        @("Advanced", { "{0:0.#} h target" -f [double]$Script:Cfg.DailyTargetHours }, "advanced"),
+        @("Account and updates", { if ($Script:UpdateAvail) { "Update ready" } else { "v$($Script:Version)" } }, "account"))
+    foreach ($r in $rows) {
+        [void](Add-HubCtrl $p (New-NavRow $r[0] $r[1] $r[2] 24 $y)); $y += 52
+    }
+    [void](Add-HubCtrl $p (New-Label "Changes save automatically." 24 ($y + 6) 352 20 $FontSmall $UI.Muted))
+    return "Settings"
+}
+
+function Build-Page-appearance($p) {
+    $y = 4
+    [void](Add-HubCtrl $p (New-Caps "Theme" 24 $y)); $y += 22
+    $i = 0
+    foreach ($name in $Script:Themes.Keys) {
+        [void](Add-HubCtrl $p (New-ThemeTile $name (24 + ($i % 3) * 120) ($y + [Math]::Floor($i / 3) * 62) 112 56))
+        $i++
+    }
+    $y += 132
+    [void](Add-HubCtrl $p (New-Caps "Shape" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Large"; V = "Large" }, @{ L = "Square"; V = "Square" }, @{ L = "Wide"; V = "Wide" }) 24 $y 352 { [string]$Script:Cfg.Shape } { param($v) $Script:IsExpanded = $false; Set-Cfg "Shape" $v })
+    $y = Below $ch 12
+    [void](Add-HubCtrl $p (New-NavRow "Font" { [string]$Script:Cfg.FontFamily } "font" 24 $y)); $y += 58
+    [void](Add-HubCtrl $p (New-Caps "Text size" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Small"; V = "S" }, @{ L = "Medium"; V = "M" }, @{ L = "Large"; V = "L" }) 24 $y 352 { [string]$Script:Cfg.TextSize } { param($v) Set-Cfg "TextSize" $v })
+    $y = Below $ch 12
+    [void](Add-HubCtrl $p (New-Caps "Background" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Glass"; V = 60 }, @{ L = "75%"; V = 75 }, @{ L = "90%"; V = 90 }, @{ L = "Solid"; V = 100 }) 24 $y 352 { [int]$Script:Cfg.Opacity } { param($v) Set-Cfg "Opacity" ([int]$v) })
+    $y = Below $ch 8
+    $sp = New-PaintPanel 0 $y 1 1; [void](Add-HubCtrl $p $sp)
+    return "Appearance"
+}
+
+function Build-Page-behaviour($p) {
+    $y = 4
+    foreach ($t in @(@("Always on top of other windows", "AlwaysOnTop", ""),
+                     @("Hide from screen sharing", "HideFromCapture", "Teams, Zoom and screenshots won't see it"),
+                     @("Auto-hide into the screen edge", "AutoHide", "A dot strip stays; hover it to bring the widget back"),
+                     @("Show seconds", "ShowSeconds", ""),
+                     @("Show today's progress", "ShowTodayTotal", ""),
+                     @("Ask before switching tasks", "ConfirmSwitch", ""),
+                     @("Sounds", "Sounds", ""),
+                     @("Start with Windows", "_autostart", ""))) {
+        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y 352 $t[2]))
+        $y += $(if ($t[2]) { 54 } else { 40 })
+    }
+    return "Widget"
+}
+
+function Build-Page-focusbreaks($p) {
+    $y = 4
+    foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
+        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 40
+    }
+    $y += 8
+    [void](Add-HubCtrl $p (New-NavRow "Focus sessions" { "{0} min  |  {1} min break" -f $Script:Cfg.FocusMinutes, $Script:Cfg.FocusBreakMinutes } "focus" 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min a day" -f $Script:Cfg.BreakLimitMinutes } "breaks" 24 $y)); $y += 52
+    return "Focus and breaks"
+}
+
+function Build-Page-account($p) {
     $H = $Script:Hub
     $y = 4
-    [void](Add-HubCtrl $p (New-Caps "Look" 24 $y)); $y += 22
-    [void](Add-HubCtrl $p (New-NavRow "Theme" { Get-CurrentThemeName } "theme" 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-NavRow "Shape" { [string]$Script:Cfg.Shape } "shape" 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-NavRow "Font" { [string]$Script:Cfg.FontFamily } "font" 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-Label "Text size" 24 ($y + 7) 110 20 $FontUI $UI.Text))
-    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "S"; V = "S" }, @{ L = "M"; V = "M" }, @{ L = "L"; V = "L" }) 150 $y 226 { [string]$Script:Cfg.TextSize } { param($v) Set-Cfg "TextSize" $v })
-    $y = Below $ch
-    [void](Add-HubCtrl $p (New-Label "Background" 24 ($y + 7) 110 20 $FontUI $UI.Text))
-    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Glass"; V = 60 }, @{ L = "75%"; V = 75 }, @{ L = "90%"; V = 90 }, @{ L = "Solid"; V = 100 }) 150 $y 226 { [int]$Script:Cfg.Opacity } { param($v) Set-Cfg "Opacity" ([int]$v) })
-    $y = Below $ch
-
-    [void](Add-HubCtrl $p (New-Caps "Widget" 24 $y)); $y += 22
-    foreach ($t in @(@("Always on top of other windows", "AlwaysOnTop"), @("Hide from screen sharing", "HideFromCapture"),
-                     @("Auto-hide into the screen edge", "AutoHide"), @("Show seconds", "ShowSeconds"),
-                     @("Show today's progress", "ShowTodayTotal"), @("Ask before switching tasks", "ConfirmSwitch"),
-                     @("Sounds", "Sounds"), @("Start with Windows", "_autostart"))) {
-        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
-    }
-    [void](Add-HubCtrl $p (New-NavRow "Favourite tasks" { "{0} pinned" -f @(Get-Favs).Count } "favourites" 24 $y)); $y += 60
-    [void](Add-HubCtrl $p (New-Caps "Focus" 24 $y)); $y += 22
-    foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
-        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
-    }
-    [void](Add-HubCtrl $p (New-NavRow "Focus sessions" { "{0} min  |  {1} min break" -f $Script:Cfg.FocusMinutes, $Script:Cfg.FocusBreakMinutes } "focus" 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min  |  {1}" -f $Script:Cfg.BreakLimitMinutes, $Script:Cfg.BreakKeywords } "breaks" 24 $y)); $y += 60
-
-    [void](Add-HubCtrl $p (New-Caps "Reminders" 24 $y)); $y += 22
-    [void](Add-HubCtrl $p (New-NavRow "Work hours" { "{0}-{1}  |  {2}" -f $Script:Cfg.WorkStart, $Script:Cfg.WorkEnd, (Format-Days $Script:Cfg.WorkDays) } "workday" 24 $y)); $y += 60
-
-    [void](Add-HubCtrl $p (New-Caps "Advanced" 24 $y)); $y += 22
-    [void](Add-HubCtrl $p (New-NavRow "Target, refresh, shortcut" { "{0:0.#} h day" -f [double]$Script:Cfg.DailyTargetHours } "advanced" 24 $y)); $y += 60
-
-    [void](Add-HubCtrl $p (New-Caps "Account" 24 $y)); $y += 22
-    $who = if ($Script:LastError -eq "AUTH") { "Your API token was rejected" } elseif ($Script:UserName) { "Connected as $($Script:UserName)" } else { "Connected" }
-    $H.AcctLabel = New-Label $who 24 $y 352 22 $FontUI $(if ($Script:LastError -eq "AUTH") { $UI.Danger } else { $UI.Text })
-    [void](Add-HubCtrl $p $H.AcctLabel); $y += 28
+    $who = if ($Script:LastError -eq "AUTH") { "Your API token was rejected" } elseif ($Script:UserName) { "Connected as $($Script:UserName)" } else { "Connected to Everhour" }
+    $H.AcctLabel = New-Label $who 24 $y 352 22 $FontUIBold $(if ($Script:LastError -eq "AUTH") { $UI.Danger } else { $UI.Text })
+    [void](Add-HubCtrl $p $H.AcctLabel); $y += 30
     [void](Add-HubCtrl $p (New-NavRow "Change API token" $null "connect" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Test connection" { Hub-TestConnection } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Run the setup guide again" { $Script:Hub.RunSetup = $true; $Script:Hub.Form.Close() } 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 60
-
+    [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 62
     [void](Add-HubCtrl $p (New-Caps "Updates" 24 $y)); $y += 22
-    $upd = if ($Script:UpdateAvail) { "Version $($Script:UpdateAvail.Version) is ready to install" } else { "Version $($Script:Version)" }
+    $upd = if ($Script:UpdateAvail) { "Version $($Script:UpdateAvail.Version) is ready to install" } else { "You have version $($Script:Version)" }
     $H.UpdLabel = New-Label $upd 24 $y 352 22 $FontUI $UI.Text
     [void](Add-HubCtrl $p $H.UpdLabel); $y += 28
     if ($Script:UpdateAvail) {
@@ -3802,12 +3839,9 @@ function Build-Page-home($p) {
     }
     [void](Add-HubCtrl $p (New-ActionRow "Check for updates" { $Script:Hub.UpdLabel.Text = "Checking..."; Check-Update -Manual } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-HubToggle "Install updates automatically" "AutoUpdate" 24 $y)); $y += 44
-    [void](Add-HubCtrl $p (New-Label "Changes save automatically." 24 $y 352 20 $FontSmall $UI.Muted))
-    $y += 30
     $sp = New-PaintPanel 0 $y 1 1; [void](Add-HubCtrl $p $sp)
-    return "Settings"
+    return "Account"
 }
-
 function Build-Page-focus($p) {
     $H = $Script:Hub
     $y = Add-Hero $p "Focus sessions" "Work in focused blocks. The edge lights count down; when time's up you get a chime and a break."
@@ -5119,14 +5153,14 @@ if ($RenderPreview) {
     [void]$Script:CapQueue.Dequeue()      # setup starts on its first page by itself
     $ct.Start()
     Show-Hub "setup" | Out-Null
-    foreach ($pg in @("_scroll", "advanced", "workday", "focus", "favourites")) { $Script:CapQueue.Enqueue("settings:$pg") }
+    foreach ($pg in @("appearance", "behaviour", "focusbreaks", "workday", "favourites", "advanced", "account")) { $Script:CapQueue.Enqueue("settings:$pg") }
     $ct.Start()
     Show-Hub "settings" | Out-Null
     foreach ($th in @("Ocean", "Light", "Sunset")) {
         foreach ($k in $Script:Themes[$th].Keys) { $Script:Cfg[$k] = $Script:Themes[$th][$k] }
         Apply-Theme
         $Script:CapSuffix = "-" + $th.ToLower()
-        $Script:CapQueue.Enqueue("settings:_scroll")
+        $Script:CapQueue.Enqueue("settings:appearance")
         $ct.Start()
         Show-Hub "settings" | Out-Null
     }

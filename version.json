@@ -1,4 +1,4 @@
 {
-  "version": "8.1",
-  "notes": "Fixes 'Update failed' when installing updates, plus Today and This week lists, double-click to restart a task, the update button on the widget, and the edge strip on every screen."
+  "version": "8.2",
+  "notes": "Settings split into small pages, background options on one line, and clearer text."
 }
