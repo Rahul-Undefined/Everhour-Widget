@@ -162,6 +162,7 @@ public class EhHotkey : NativeWindow, IDisposable {
 
 public class EhMenuColors : ProfessionalColorTable {
     public static Color Bg = Color.FromArgb(34, 34, 40), Hover = Color.FromArgb(50, 50, 60), Line = Color.FromArgb(54, 54, 62);
+    public static Color Text = Color.FromArgb(232, 232, 237), Muted = Color.FromArgb(110, 110, 120);
     public override Color MenuItemSelected { get { return Hover; } }
     public override Color MenuItemSelectedGradientBegin { get { return Hover; } }
     public override Color MenuItemSelectedGradientEnd { get { return Hover; } }
@@ -177,8 +178,12 @@ public class EhMenuColors : ProfessionalColorTable {
 public class EhMenuRenderer : ToolStripProfessionalRenderer {
     public EhMenuRenderer() : base(new EhMenuColors()) { RoundedEdges = false; }
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
-        e.TextColor = e.Item.Enabled ? Color.FromArgb(232, 232, 237) : Color.FromArgb(110, 110, 120);
+        e.TextColor = e.Item.Enabled ? EhMenuColors.Text : EhMenuColors.Muted;
         base.OnRenderItemText(e);
+    }
+    protected override void OnRenderArrow(ToolStripArrowRenderEventArgs e) {
+        e.ArrowColor = EhMenuColors.Text;
+        base.OnRenderArrow(e);
     }
 }
 "@
@@ -1587,6 +1592,37 @@ $UI = @{
     AccentH = [System.Drawing.ColorTranslator]::FromHtml("#5B96F8")
     Good    = [System.Drawing.ColorTranslator]::FromHtml("#4ADE80")
     Danger  = [System.Drawing.ColorTranslator]::FromHtml("#F87171")
+    OnAccent = [System.Drawing.Color]::White
+    IsLight = $false
+}
+
+# Settings, the task picker and every dialog take their colours from the
+# widget's theme, so the whole app looks like one piece.
+function Update-UiPalette {
+    $c = $Script:Cfg
+    $back = ToColor $c.BackColor; $acc = ToColor $c.AccentColor
+    $text = ToColor $c.TimeColor; $task = ToColor $c.TaskColor; $idle = ToColor $c.IdleColor
+    $light = IsLight $back
+    $toward = if ($light) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::White }
+    $UI.IsLight = $light
+    $UI.Bg      = $back
+    $UI.Card    = Mix $back $toward $(if ($light) { 0.05 } else { 0.06 })
+    $UI.Sel     = Mix (Mix $back $toward 0.10) $acc 0.14
+    $UI.Line    = Mix $back $toward $(if ($light) { 0.13 } else { 0.15 })
+    $UI.Text    = $text
+    $UI.Muted   = Mix $idle $task 0.35
+    $UI.Accent  = $acc
+    $UI.AccentH = Mix $acc $toward 0.15
+    $UI.Danger  = ToColor $c.ErrorColor
+    $UI.Good    = if ($light) { ToColor "#16A34A" } else { ToColor "#4ADE80" }
+    $UI.OnAccent = if (IsLight $acc) { ToColor "#111114" } else { [System.Drawing.Color]::White }
+    if ($Script:HasWinApi) {
+        try {
+            [EhMenuColors]::Bg = $UI.Card; [EhMenuColors]::Hover = $UI.Sel; [EhMenuColors]::Line = $UI.Line
+            [EhMenuColors]::Text = $UI.Text; [EhMenuColors]::Muted = $UI.Muted
+        } catch { }
+    }
+    if ($menu) { $menu.BackColor = $UI.Card; $menu.ForeColor = $UI.Text }
 }
 
 # Dialog fonts: Inter when bundled (private font, registered for GDI too),
@@ -1670,7 +1706,7 @@ function New-FlatButton {
     $b.Cursor = "Hand"
     $b.UseVisualStyleBackColor = $false
     if ($Primary) {
-        $b.BackColor = $UI.Accent; $b.ForeColor = [System.Drawing.Color]::White
+        $b.BackColor = $UI.Accent; $b.ForeColor = $UI.OnAccent
         $b.FlatAppearance.BorderSize = 0
         $b.FlatAppearance.MouseOverBackColor = $UI.AccentH
         $b.Font = $FontUIBold
@@ -2029,6 +2065,7 @@ function Get-AnimTime {
 
 function Apply-Theme {
     $c = $Script:Cfg
+    Update-UiPalette
     $Script:C = @{
         Back   = ToColor $c.BackColor
         Task   = ToColor $c.TaskColor
@@ -2985,7 +3022,7 @@ function New-Chips($opts, [int]$x, [int]$y, [int]$w, [scriptblock]$Get, [scriptb
             Fill-Round $g $(if ($sel) { $UI.Accent } else { $UI.Card }) $rc.X $rc.Y ($rc.Width - 1) ($rc.Height - 1) ($rc.Height / 2)
             $lbl = [string]$r.Opt.L
             if ($v -eq "__custom" -and $sel) { $lbl = "$cur $($t.Unit)" }
-            $fc = if ($sel) { [System.Drawing.Color]::White } else { $UI.Text }
+            $fc = if ($sel) { $UI.OnAccent } else { $UI.Text }
             Draw-UiText $g $lbl $FontUIBold $fc $rc "Center"
         }
     })
@@ -3127,7 +3164,7 @@ function New-PreviewStage([int]$x, [int]$y, [int]$w, [int]$h, [string[]]$modes) 
     $p.Add_Paint({
         param($s, $e)
         $g = Start-Paint $e
-        Fill-Round $g (ToColor "#101013") 0 0 ($s.Width - 1) ($s.Height - 1) (Px 14)
+        Fill-Round $g $UI.Card 0 0 ($s.Width - 1) ($s.Height - 1) (Px 14)
         $t = Get-HubTime
         $ms = $s.Tag.Modes
         $i = [int][Math]::Floor($t / 3.5) % $ms.Count
@@ -3194,8 +3231,35 @@ function New-ThemeTile([string]$name, [int]$x, [int]$y, [int]$w, [int]$h = 64) {
         foreach ($k in $t.Keys) { $Script:Cfg[$k] = $t[$k] }
         Save-Config; Apply-Theme
         foreach ($c in $s.Parent.Controls) { $c.Invalidate() }
+        if ($Script:HubOpen) { Queue-HubRetheme }
     })
     return $p
+}
+
+# Repaint the open Settings / setup window in the new theme. Runs a moment
+# later, because the page holding the clicked tile gets rebuilt.
+function Queue-HubRetheme {
+    $Script:RethemeKick = New-Object System.Windows.Forms.Timer
+    $Script:RethemeKick.Interval = 30
+    $Script:RethemeKick.Add_Tick({ $Script:RethemeKick.Stop(); $Script:RethemeKick.Dispose(); Hub-Retheme })
+    $Script:RethemeKick.Start()
+}
+function Hub-Retheme {
+    $H = $Script:Hub
+    if (-not $H -or -not $H.Form -or $H.Form.IsDisposed) { return }
+    $H.Form.BackColor = $UI.Bg; $H.View.BackColor = $UI.Bg; $H.Bar.BackColor = $UI.Bg
+    $H.BackBtn.ForeColor = $UI.Text; $H.TitleLbl.ForeColor = $UI.Text; $H.CloseBtn.ForeColor = $UI.Muted
+    if ($H.Next) {
+        $H.Next.BackColor = $UI.Accent; $H.Next.ForeColor = $UI.OnAccent
+        $H.Next.FlatAppearance.MouseOverBackColor = $UI.AccentH
+        $H.Dots.BackColor = $UI.Bg
+    }
+    Set-DwmLook $H.Form
+    $scroll = 0
+    if ($H.Current) { $scroll = -$H.Current.AutoScrollPosition.Y }
+    Hub-Go $H.PageName 1 -NoAnim
+    if ($scroll -gt 0) { $H.Current.AutoScrollPosition = New-Object System.Drawing.Point(0, $scroll) }
+    $H.Form.Invalidate($true)
 }
 
 function New-ShapeTile([string]$name, [string]$desc, [int]$x, [int]$y, [int]$w, [int]$h) {
@@ -3650,18 +3714,33 @@ function Show-Hub([string]$Mode = "settings", [string]$Page = "") {
     $H.Form = $f
 
     # header: back, title, close
+    # header in the widget's style: theme gradient with a strip of edge-light dots
     $bar = New-PaintPanel 0 0 $W 58
+    $bar.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $rect = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
+        $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $UI.Bg, (Mix $UI.Bg $UI.Accent 0.22), [single]0)
+        $g.FillRectangle($lg, $rect); $lg.Dispose()
+        $n = [int]($s.Width / (Px 9))
+        $lit = [int]($n * 0.35)
+        for ($i = 0; $i -lt $n; $i++) {
+            $a = if ($i -lt $lit) { 230 - $i * 3 } else { 45 }
+            Fill-Circle $g (A $UI.Accent $a) ((Px 6) + $i * (Px 9)) ($s.Height - (Px 4)) ([single](Px 1.5))
+        }
+    })
     $f.Controls.Add($bar)
-    $back = New-Label ([string][char]0x2039) 10 8 34 40 (New-Object System.Drawing.Font("Segoe UI", 20)) $UI.Text
+    $H.Bar = $bar
+    $back = New-Label ([string][char]0x2039) 10 6 34 40 (New-Object System.Drawing.Font("Segoe UI", 20)) $UI.Text
     $back.TextAlign = "MiddleCenter"; $back.Cursor = "Hand"
     $back.Add_Click({ Hub-Back })
     $bar.Controls.Add($back); $H.BackBtn = $back
-    $H.TitleLbl = New-Label "" 46 16 260 28 $FontTitle $UI.Text
+    $H.TitleLbl = New-Label "" 46 14 260 28 $FontTitle $UI.Text
     $bar.Controls.Add($H.TitleLbl)
-    $x = New-Label ([string][char]0x2715) ($W - 46) 13 32 30 (New-Object System.Drawing.Font("Segoe UI", 10.5)) $UI.Muted
+    $x = New-Label ([string][char]0x2715) ($W - 46) 11 32 30 (New-Object System.Drawing.Font("Segoe UI", 10.5)) $UI.Muted
     $x.TextAlign = "MiddleCenter"; $x.Cursor = "Hand"
     $x.Add_Click({ $Script:Hub.Form.Close() })
-    $bar.Controls.Add($x)
+    $bar.Controls.Add($x); $H.CloseBtn = $x
     Enable-Drag $bar; Enable-Drag $H.TitleLbl
 
     $vp = New-Object System.Windows.Forms.Panel
@@ -4785,7 +4864,7 @@ if ($RenderPreview) {
         if (-not $H -or $H.Form.IsDisposed -or -not $H.Form.Visible) { return }
         if ($H.Slide) { Finish-Slide }
         $f = $H.Form
-        $nm = "$($H.Mode)-$($H.PageName)"
+        $nm = "$($H.Mode)-$($H.PageName)$($Script:CapSuffix)"
         if ($Script:CapScrollNext) { $H.Current.AutoScrollPosition = New-Object System.Drawing.Point(0, 99999); $f.Refresh(); $nm += "-bottom" }
         $cb = New-Object System.Drawing.Bitmap($f.Width, $f.Height)
         $f.DrawToBitmap($cb, (New-Object System.Drawing.Rectangle(0, 0, $f.Width, $f.Height)))
@@ -4805,6 +4884,15 @@ if ($RenderPreview) {
     foreach ($pg in @("_scroll", "advanced", "workday", "focus", "favourites")) { $Script:CapQueue.Enqueue("settings:$pg") }
     $ct.Start()
     Show-Hub "settings" | Out-Null
+    foreach ($th in @("Ocean", "Light", "Sunset")) {
+        foreach ($k in $Script:Themes[$th].Keys) { $Script:Cfg[$k] = $Script:Themes[$th][$k] }
+        Apply-Theme
+        $Script:CapSuffix = "-" + $th.ToLower()
+        $Script:CapQueue.Enqueue("settings:_scroll")
+        $ct.Start()
+        Show-Hub "settings" | Out-Null
+    }
+    $Script:CapSuffix = ""
     $ct.Stop()
     # focus session look
     $Script:Cfg.Shape = "Large"; Apply-Theme; Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120
