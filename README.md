@@ -32,6 +32,10 @@ A task counts as a break when its name contains words you choose (e.g. "break", 
 
 Whatever the shape, the widget never goes off screen: opening it near an edge makes it grow the other way.
 
+## How to use
+
+Right-click the widget and choose **How to use...** for a three-minute interactive tour played over real screenshots (also in Settings → Account and updates). The tour is `assets/guide.html`; it works offline.
+
 ## Today and This week
 
 The list on the widget has two groups, **Today** and **This week** — click a heading to open or close it (only one is open at a time, so the widget never grows too tall). Each shows five tasks; scroll with the mouse wheel for the rest. **Double-click any task to start its timer again.**

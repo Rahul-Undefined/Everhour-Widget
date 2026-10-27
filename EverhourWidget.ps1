@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.4"
+$Script:Version = "8.5"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -444,6 +444,11 @@ function Copy-AppFiles([string]$from, [string]$to) {
             $copied = Copy-IfChanged $src (Join-Path $to $f)
             if (-not $copied -and $f -eq "EverhourWidget.ps1") { $ok = $false }
         }
+    }
+    $guide = Join-Path $from "assets\guide.html"
+    if (Test-Path $guide) {
+        New-Item -ItemType Directory -Force -Path (Join-Path $to "assets") | Out-Null
+        [void](Copy-IfChanged $guide (Join-Path $to "assets\guide.html"))
     }
     $fs = Get-FontDir $from
     if (Test-Path $fs) {
@@ -3864,6 +3869,7 @@ function Build-Page-account($p) {
     [void](Add-HubCtrl $p $H.AcctLabel); $y += 30
     [void](Add-HubCtrl $p (New-NavRow "Change API token" $null "connect" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Test connection" { Hub-TestConnection } 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-ActionRow "How to use the widget" { Open-Guide } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Run the setup guide again" { $Script:Hub.RunSetup = $true; $Script:Hub.Form.Close() } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 62
     [void](Add-HubCtrl $p (New-Caps "Updates" 24 $y)); $y += 22
@@ -4232,6 +4238,12 @@ function Hub-TestConnection {
 }
 
 function Show-Settings { Show-Hub "settings" | Out-Null }
+
+# The illustrated guide that ships with the widget; the online README if it's missing.
+function Open-Guide {
+    $g = Join-Path $ScriptDir "assets\guide.html"
+    if (Test-Path $g) { Start-Process $g } else { Start-Process "https://github.com/Rahul-Undefined/Everhour-Widget#readme" }
+}
 
 # ===========================================================================
 #  TASK PICKER
@@ -4765,6 +4777,8 @@ $miShape    = $menu.Items.Add("Shape")
 function Get-NextShape { switch ([string]$Script:Cfg.Shape) { "Large" { return "Square" } "Square" { return "Wide" } default { return "Large" } } }
 $miSettings = $menu.Items.Add("Settings...")
 $miGuide    = $menu.Items.Add("Setup guide...")
+$miHowTo    = $menu.Items.Add("How to use...")
+$miHowTo.Add_Click({ Open-Guide })
 $miUpdate   = $menu.Items.Add("Install update")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miExit     = $menu.Items.Add("Exit")

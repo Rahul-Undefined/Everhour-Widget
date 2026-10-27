@@ -1,0 +1,351 @@
+<title>Everhour Widget Tour</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* Layout: a video player for a desktop gadget - the stage plays a guided tour
+   over real screenshots; captions sit beside it; chapters and a scrub bar below. */
+:root {
+  --bg: #f4f1ec;
+  --panel: #ffffff;
+  --ink: #1d1a17;
+  --muted: #6b635b;
+  --line: #e2dad0;
+  --accent: #e2711d;
+  --accent-ink: #ffffff;
+  --stage: #1a1614;
+  --dim: rgba(10, 8, 7, 0.62);
+  --display: "Sora", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --body: "DM Sans", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, "Cascadia Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141110; --panel: #1f1b18; --ink: #f1ebe4; --muted: #a99d92; --line: #332c27;
+    --accent: #f28c38; --accent-ink: #1a1410; --stage: #0c0a09; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141110; --panel: #1f1b18; --ink: #f1ebe4; --muted: #a99d92; --line: #332c27;
+  --accent: #f28c38; --accent-ink: #1a1410; --stage: #0c0a09; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body {
+  background: var(--bg); color: var(--ink); font: 16px/1.55 var(--body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+h1, h2 { font-family: var(--display); margin: 0; line-height: 1.15; text-wrap: balance; }
+kbd { font-family: var(--mono); }
+
+.app { max-width: 1240px; margin: 0 auto; padding-block: 28px 48px; display: grid; gap: 18px; }
+.top { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px 20px; }
+.top h1 { font-size: clamp(1.4rem, 3vw, 2rem); letter-spacing: -0.015em; }
+.top .sub { color: var(--muted); font-size: 0.95rem; }
+
+.player { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; }
+.stage {
+  position: relative; background: var(--stage); border-radius: 20px; overflow: hidden;
+  height: min(72vh, 680px); min-height: 380px; display: grid; place-items: center; padding: 22px;
+}
+.frame { position: relative; display: inline-block; max-width: 100%; max-height: 100%; line-height: 0; }
+.frame img { display: block; max-width: 100%; max-height: calc(min(72vh, 680px) - 44px); width: auto; height: auto; border-radius: 6px; transition: opacity .35s ease; }
+.frame img.fade { opacity: 0; }
+.clip { position: absolute; inset: 0; overflow: hidden; border-radius: 6px; pointer-events: none; }
+.spot {
+  position: absolute; border-radius: 12px; border: 2px solid var(--accent);
+  box-shadow: 0 0 0 3000px var(--dim), 0 0 24px 2px rgba(242, 140, 56, .55);
+  transition: left .6s ease, top .6s ease, width .6s ease, height .6s ease, opacity .4s ease;
+}
+.spot.off { opacity: 0; }
+.cursor { position: absolute; width: 26px; height: 32px; left: 50%; top: 50%; transition: left .9s cubic-bezier(.45,.05,.25,1), top .9s cubic-bezier(.45,.05,.25,1); filter: drop-shadow(0 2px 3px rgba(0,0,0,.5)); pointer-events: none; z-index: 3; }
+.ripple { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 3px solid #fff; opacity: 0; pointer-events: none; z-index: 2; }
+.ripple.go { animation: ripple .7s ease-out; }
+@keyframes ripple { from { transform: scale(.4); opacity: .95; } to { transform: scale(4); opacity: 0; } }
+
+/* scenes without a screenshot */
+.mock { display: none; }
+.mock.on { display: grid; }
+.menu { background: #26201d; color: #ece6df; border: 1px solid #3a322d; border-radius: 10px; padding: 6px; min-width: 250px; gap: 1px; font-size: 0.95rem; }
+.menu div { padding: 8px 14px; border-radius: 6px; line-height: 1.2; }
+.menu div.sep { height: 1px; padding: 0; margin: 4px 6px; background: #3a322d; }
+.menu div.hi { background: #3d342e; }
+.keys { gap: 22px; justify-items: center; }
+.keyrow { display: flex; align-items: center; gap: 14px; }
+.key {
+  font: 600 1.4rem/1 var(--mono); color: #f3eee8; padding: 18px 24px; border-radius: 12px;
+  background: #2b2420; border: 1px solid #44392f; box-shadow: 0 6px 0 #0e0b0a; transition: transform .15s, box-shadow .15s, background .15s;
+}
+.key.down { transform: translateY(5px); box-shadow: 0 1px 0 #0e0b0a; background: var(--accent); color: #1a1410; }
+.plus { color: #8d8178; font: 600 1.4rem var(--display); }
+.keys .hint { color: #c9bfb5; font-size: 0.95rem; }
+
+.side { display: grid; grid-template-rows: auto 1fr; gap: 14px; min-width: 0; }
+.caption { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 20px; display: grid; gap: 10px; align-content: start; }
+.caption .chap { font: 600 0.72rem/1 var(--display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.caption h2 { font-size: 1.45rem; }
+.caption p { margin: 0; color: var(--ink); }
+.caption .count { font-size: 0.82rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.caption .anim { animation: rise .45s ease both; }
+@keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.chapters { background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 10px; display: grid; gap: 2px; align-content: start; overflow: auto; max-height: calc(min(72vh, 680px) - 230px); }
+.chapters button { text-align: left; background: none; border: 0; border-radius: 10px; padding: 8px 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 10px; font-size: 0.93rem; }
+.chapters button:hover { background: var(--bg); color: var(--ink); }
+.chapters button.on { background: var(--bg); color: var(--ink); font-weight: 700; }
+.chapters button span:last-child { font-variant-numeric: tabular-nums; }
+
+.controls { display: grid; grid-template-columns: auto auto auto minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.cbtn { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); background: var(--panel); display: grid; place-items: center; }
+.cbtn.main { width: 52px; height: 52px; background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.cbtn svg { width: 18px; height: 18px; fill: currentColor; }
+.timeline { display: flex; gap: 3px; height: 30px; align-items: center; min-width: 0; }
+.seg { flex: 1 1 0; height: 6px; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; border: 0; padding: 0; }
+.seg:hover { height: 10px; }
+.seg i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--accent); }
+.time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 0.85rem; min-width: 84px; text-align: right; }
+.foot { color: var(--muted); font-size: 0.85rem; }
+
+@media (max-width: 900px) {
+  .player { grid-template-columns: minmax(0, 1fr); }
+  .stage { height: 56vh; min-height: 320px; }
+  .frame img { max-height: calc(56vh - 44px); }
+  .chapters { max-height: none; display: flex; flex-wrap: wrap; }
+  .chapters button { padding: 6px 10px; border: 1px solid var(--line); }
+  .chapters button span:last-child { display: none; }
+  .controls { grid-template-columns: auto auto auto minmax(0, 1fr); }
+  .time { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cursor, .spot { transition: none; }
+  .ripple.go, .caption .anim { animation: none; }
+}
+</style>
+
+<div class="app">
+  <div class="top">
+    <h1>How the Everhour Widget works</h1>
+    <div class="sub">A three-minute guided tour. Press <kbd>Space</kbd> to pause, <kbd>&larr;</kbd> <kbd>&rarr;</kbd> to step.</div>
+  </div>
+
+  <div class="player">
+    <div class="stage" id="stage" aria-live="polite">
+      <div class="frame" id="frame">
+        <img id="shot" alt="">
+        <div class="clip"><div class="spot off" id="spot"></div></div>
+        <div class="ripple" id="ripple"></div>
+        <svg class="cursor" id="cursor" viewBox="0 0 26 32" aria-hidden="true"><path d="M2 2 L2 26 L8 20 L12.5 30 L17 28 L12.5 18.5 L21 18.5 Z" fill="#fff" stroke="#111" stroke-width="1.6" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="mock menu" id="menu" role="presentation">
+        <div>Start a timer...</div><div>Stop timer</div><div>Favourites &#x203A;</div><div>Focus &#x203A;</div>
+        <div class="sep"></div><div>Edit note...</div><div>Add missed time...</div><div>Hide names and times</div>
+        <div class="sep"></div><div>Refresh now</div><div>Open Everhour</div><div>Shape: switch to square</div><div>Settings...</div><div>How to use...</div>
+      </div>
+      <div class="mock keys" id="keys">
+        <div class="keyrow"><span class="key" data-k="0">Ctrl</span><span class="plus">+</span><span class="key" data-k="1">Alt</span><span class="plus">+</span><span class="key" data-k="2">E</span></div>
+        <div class="hint">Works in any app</div>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="caption" id="caption">
+        <div class="chap" id="chap"></div>
+        <h2 id="title"></h2>
+        <p id="text"></p>
+        <div class="count" id="count"></div>
+      </div>
+      <nav class="chapters" id="chapters" aria-label="Chapters"></nav>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="cbtn" id="prev" aria-label="Previous step"><svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg></button>
+    <button class="cbtn main" id="play" aria-label="Pause"><svg viewBox="0 0 24 24" id="playIcon"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg></button>
+    <button class="cbtn" id="next" aria-label="Next step"><svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg></button>
+    <div class="timeline" id="timeline"></div>
+    <div class="time" id="time"></div>
+  </div>
+  <div class="foot">Open this tour any time from the widget: right-click &rarr; <b>How to use...</b></div>
+</div>
+
+<script>
+(function () {
+  // r = highlighted area [x, y, width, height] in the screenshot's own pixels
+  var S = [
+    { ch: "Get started", img: "{{IMG:hub-setup-welcome}}", r: [325, 752, 145, 50], t: "Install it", d: "Double-click Install Everhour Widget.vbs. A short setup opens; press Get started." },
+    { ch: "Get started", img: "{{IMG:hub-setup-connect}}", r: [30, 188, 440, 205], t: "Find your API token", d: "In Everhour: your name (bottom-left), My Profile, Application Access, then copy the API Token. The animation shows where." },
+    { ch: "Get started", img: "{{IMG:hub-setup-connect}}", r: [30, 398, 440, 48], t: "Paste and connect", d: "Paste the token and press Connect. If it's already on your clipboard, it fills in by itself." },
+    { ch: "Get started", img: "{{IMG:hub-setup-theme}}", r: [30, 160, 440, 190], t: "Make it yours", d: "Pick a theme, then a shape, font, text size, work hours, break allowance and daily target. Every answer saves straight away." },
+    { ch: "Get started", img: "{{IMG:hub-setup-finish}}", r: [30, 318, 440, 66], t: "Start tracking", d: "Press Start tracking. From now on the widget starts with Windows by itself." },
+    { ch: "The widget", img: "{{IMG:large-running}}", r: [316, 57, 56, 56], t: "Start and stop", d: "The round button starts or stops the timer. When nothing runs, it resumes the last task you tracked." },
+    { ch: "The widget", img: "{{IMG:large-running}}", r: [56, 108, 262, 100], t: "What you're tracking", d: "The running task and its timer." },
+    { ch: "The widget", img: "{{IMG:large-running}}", r: [56, 184, 316, 48], t: "Today's progress", d: "Time tracked today, filling up towards your daily target." },
+    { ch: "The widget", img: "{{IMG:large-running}}", r: [44, 44, 342, 606], t: "Edge lights", d: "The dots round the border complete one lap every minute, like a seconds hand, on tasks and on breaks." },
+    { ch: "Today and This week", img: "{{IMG:large-running}}", r: [56, 254, 320, 178], t: "Today", d: "Every task you tracked today. Double-click one to start it again; scroll with the mouse wheel for more." },
+    { ch: "Today and This week", img: "{{IMG:large-week-scrolled}}", r: [56, 286, 330, 214], t: "This week", d: "Click This week for the whole week. Only one list is open at a time, so the widget stays compact." },
+    { ch: "Today and This week", img: "{{IMG:large-groups-closed}}", r: [56, 252, 320, 72], t: "Close both", d: "Click a heading to close its list; the widget gets shorter." },
+    { ch: "Start, stop, switch", img: "{{IMG:large-running}}", r: [56, 474, 320, 112], t: "Quick switch", d: "Your favourite tasks, one click to start. Pin up to five with the star in the task picker." },
+    { ch: "Start, stop, switch", img: "{{IMG:large-running}}", r: [56, 594, 320, 46], t: "Switch, Stop, Settings", d: "Switch opens the task picker with your recent tasks, live search and a box for a note." },
+    { ch: "Start, stop, switch", mock: "keys", t: "From anywhere", d: "Press Ctrl + Alt + E in any app to start or stop the timer, even when the widget is hidden." },
+    { ch: "Start, stop, switch", mock: "menu", t: "Right-click for more", d: "Favourites, focus sessions, edit the running note, add time you forgot, hide names and times, change the shape, settings and this tour." },
+    { ch: "Colours", img: "{{IMG:large-break}}", r: [44, 44, 342, 606], t: "On a break", d: "Teal with a steaming cup. The bar shows how much of today's break allowance you've used." },
+    { ch: "Colours", img: "{{IMG:large-overbreak}}", r: [44, 44, 342, 606], t: "Break over the limit", d: "Red-orange with chasing lights and an alert sound. Time to get back." },
+    { ch: "Colours", img: "{{IMG:large-stopped}}", r: [56, 108, 300, 104], t: "No timer running", d: "The widget turns red and counts how long the timer has been off." },
+    { ch: "Focus", img: "{{IMG:large-focus}}", r: [56, 64, 232, 40], t: "Focus sessions", d: "Right-click, Focus, then 25 or 50 min. The edge lights count down; then a chime and a break." },
+    { ch: "Privacy", img: "{{IMG:large-privacy}}", r: [282, 68, 36, 34], t: "Hide names and times", d: "Click the eye and everything turns into dots; click again to show it. The widget is also hidden from screen sharing." },
+    { ch: "Shapes", img: "{{IMG:square-running}}", r: null, t: "Square", d: "A compact square. Click it to open the lists." },
+    { ch: "Shapes", img: "{{IMG:wide-running}}", r: null, t: "Wide", d: "A slim bar that fits along the top or bottom of your screen." },
+    { ch: "Shapes", img: "{{IMG:peek-stopped}}", r: null, t: "Auto-hide", d: "The widget slides into the screen edge; this strip keeps showing the status on every monitor. Hover it to bring the widget back." },
+    { ch: "Settings", img: "{{IMG:hub-settings-home}}", r: [30, 272, 440, 456], t: "Settings", d: "Right-click, Settings. Seven short pages; every change saves and shows on the widget at once." },
+    { ch: "Settings", img: "{{IMG:hub-settings-appearance}}", r: [30, 92, 440, 170], t: "Appearance", d: "Six themes, three shapes, twelve fonts, text size and background." },
+    { ch: "Settings", img: "{{IMG:hub-settings-workday}}", r: [30, 166, 440, 190], t: "Work hours", d: "Scroll the wheels to set your hours, then pick your work days and reminders." },
+    { ch: "Updates", img: "{{IMG:large-update-pill}}", r: [62, 68, 154, 32], t: "Always up to date", d: "New versions install themselves. If you turned that off, click the Update pill on the widget." }
+  ];
+  S.forEach(function (s) { s.ms = Math.max(5200, Math.min(9500, 3200 + s.d.length * 38)); });
+  var total = S.reduce(function (a, s) { return a + s.ms; }, 0);
+
+  var $ = function (id) { return document.getElementById(id); };
+  var shot = $("shot"), frame = $("frame"), spot = $("spot"), cursor = $("cursor"), ripple = $("ripple");
+  var menu = $("menu"), keys = $("keys");
+  var idx = 0, t0 = 0, elapsedBefore = 0, playing = true, raf = 0, timers = [];
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // timeline segments and chapter list
+  var tl = $("timeline");
+  S.forEach(function (s, i) {
+    var b = document.createElement("button");
+    b.className = "seg"; b.style.flexGrow = s.ms; b.setAttribute("aria-label", "Step " + (i + 1) + ": " + s.t);
+    b.appendChild(document.createElement("i"));
+    b.addEventListener("click", function () { go(i, true); });
+    tl.appendChild(b);
+  });
+  var chapters = [];
+  S.forEach(function (s, i) { if (!chapters.length || chapters[chapters.length - 1].name !== s.ch) chapters.push({ name: s.ch, first: i }); });
+  var cl = $("chapters");
+  chapters.forEach(function (c) {
+    var b = document.createElement("button");
+    var start = S.slice(0, c.first).reduce(function (a, s) { return a + s.ms; }, 0);
+    b.innerHTML = "<span></span><span>" + fmt(start) + "</span>";
+    b.firstChild.textContent = c.name;
+    b.addEventListener("click", function () { go(c.first, true); });
+    c.el = b; cl.appendChild(b);
+  });
+
+  function fmt(ms) { var s = Math.round(ms / 1000); return Math.floor(s / 60) + ":" + ("0" + (s % 60)).slice(-2); }
+  function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+  function later(fn, ms) { timers.push(setTimeout(fn, reduce ? 0 : ms)); }
+
+  function place(s) {
+    var k = shot.clientWidth / (shot.naturalWidth || 1);
+    if (!s.r || !k) { spot.classList.add("off"); return { x: shot.clientWidth * 0.62, y: shot.clientHeight * 0.55 }; }
+    var r = s.r, pad = 6;
+    spot.classList.remove("off");
+    spot.style.left = (r[0] * k - pad) + "px"; spot.style.top = (r[1] * k - pad) + "px";
+    spot.style.width = (r[2] * k + 2 * pad) + "px"; spot.style.height = (r[3] * k + 2 * pad) + "px";
+    return { x: (r[0] + Math.min(r[2] * 0.5, 60)) * k, y: (r[1] + r[3] * 0.5) * k };
+  }
+
+  function show(i) {
+    var s = S[i];
+    clearTimers();
+    $("chap").textContent = s.ch;
+    $("title").textContent = s.t;
+    $("text").textContent = s.d;
+    $("count").textContent = "Step " + (i + 1) + " of " + S.length;
+    var cap = $("caption"); cap.classList.remove("anim"); void cap.offsetWidth; cap.classList.add("anim");
+    chapters.forEach(function (c, n) {
+      var next = chapters[n + 1] ? chapters[n + 1].first : S.length;
+      c.el.classList.toggle("on", i >= c.first && i < next);
+    });
+    menu.classList.toggle("on", s.mock === "menu");
+    keys.classList.toggle("on", s.mock === "keys");
+    frame.hidden = !!s.mock;
+    if (s.mock === "menu") {
+      var items = Array.prototype.filter.call(menu.children, function (d) { return !d.classList.contains("sep"); });
+      items.forEach(function (d, n) { later(function () { items.forEach(function (x) { x.classList.remove("hi"); }); d.classList.add("hi"); }, 500 + n * 520); });
+      return;
+    }
+    if (s.mock === "keys") {
+      var ks = keys.querySelectorAll(".key");
+      ks.forEach(function (k) { k.classList.remove("down"); });
+      [0, 1, 2].forEach(function (n) { later(function () { ks[n].classList.add("down"); }, 600 + n * 350); });
+      later(function () { ks.forEach(function (k) { k.classList.remove("down"); }); }, 2400);
+      return;
+    }
+    var swap = shot.getAttribute("src") !== s.img;
+    var aim = function () {
+      var p = place(s);
+      later(function () { cursor.style.left = p.x + "px"; cursor.style.top = p.y + "px"; }, 250);
+      later(function () {
+        ripple.style.left = p.x + "px"; ripple.style.top = p.y + "px";
+        ripple.classList.remove("go"); void ripple.offsetWidth; ripple.classList.add("go");
+      }, 1250);
+    };
+    if (swap) {
+      shot.classList.add("fade");
+      later(function () {
+        shot.onload = function () { shot.classList.remove("fade"); aim(); };
+        shot.src = s.img;
+        shot.alt = s.t;
+      }, 220);
+    } else { aim(); }
+  }
+
+  function go(i, fromUser) {
+    idx = Math.max(0, Math.min(S.length - 1, i));
+    elapsedBefore = S.slice(0, idx).reduce(function (a, s) { return a + s.ms; }, 0);
+    t0 = performance.now();
+    show(idx);
+    if (fromUser && !playing) paint(0);
+  }
+
+  function paint(inScene) {
+    var segs = tl.children;
+    for (var n = 0; n < segs.length; n++) {
+      segs[n].firstChild.style.width = n < idx ? "100%" : n > idx ? "0%" : Math.min(100, inScene / S[idx].ms * 100) + "%";
+    }
+    $("time").textContent = fmt(elapsedBefore + inScene) + " / " + fmt(total);
+  }
+
+  var pausedAt = 0;
+  function tick(now) {
+    var inScene = now - t0;
+    if (inScene >= S[idx].ms) {
+      if (idx < S.length - 1) { go(idx + 1); inScene = 0; }
+      else { setPlaying(false); pausedAt = S[idx].ms; paint(pausedAt); return; }
+    }
+    paint(inScene);
+    raf = requestAnimationFrame(tick);
+  }
+
+  function setPlaying(p) {
+    playing = p;
+    $("play").setAttribute("aria-label", p ? "Pause" : "Play");
+    $("playIcon").innerHTML = p ? '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>' : '<path d="M7 5v14l12-7z"/>';
+    cancelAnimationFrame(raf);
+    if (p) {
+      if (idx === S.length - 1 && pausedAt >= S[idx].ms) { go(0); pausedAt = 0; }
+      t0 = performance.now() - pausedAt;
+      raf = requestAnimationFrame(tick);
+    } else {
+      pausedAt = performance.now() - t0;
+    }
+  }
+
+  $("play").addEventListener("click", function () { setPlaying(!playing); });
+  $("next").addEventListener("click", function () { pausedAt = 0; go(idx + 1, true); });
+  $("prev").addEventListener("click", function () { pausedAt = 0; go(idx - 1, true); });
+  document.addEventListener("keydown", function (e) {
+    if (e.target && /input|textarea/i.test(e.target.tagName)) return;
+    if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === "ArrowRight") { pausedAt = 0; go(idx + 1, true); }
+    else if (e.key === "ArrowLeft") { pausedAt = 0; go(idx - 1, true); }
+  });
+  window.addEventListener("resize", function () { if (!S[idx].mock) { var p = place(S[idx]); cursor.style.left = p.x + "px"; cursor.style.top = p.y + "px"; } });
+
+  go(0);
+  raf = requestAnimationFrame(tick);
+})();
+</script>
