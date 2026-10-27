@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v8.4
+    EverhourWidget.ps1  -  v8.6
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.5"
+$Script:Version = "8.6"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -445,16 +445,19 @@ function Copy-AppFiles([string]$from, [string]$to) {
             if (-not $copied -and $f -eq "EverhourWidget.ps1") { $ok = $false }
         }
     }
-    $guide = Join-Path $from "assets\guide.html"
-    if (Test-Path $guide) {
-        New-Item -ItemType Directory -Force -Path (Join-Path $to "assets") | Out-Null
-        [void](Copy-IfChanged $guide (Join-Path $to "assets\guide.html"))
-    }
-    $fs = Get-FontDir $from
-    if (Test-Path $fs) {
+    # everything under assets (fonts, the tour and its pictures), whatever is added later
+    $as = Join-Path $from "assets"
+    if (Test-Path $as) {
+        foreach ($ff in Get-ChildItem $as -Recurse -File) {
+            $dst = Join-Path (Join-Path $to "assets") $ff.FullName.Substring($as.Length + 1)
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            [void](Copy-IfChanged $ff.FullName $dst)
+        }
+    } elseif (Test-Path (Join-Path $from "fonts")) {
+        # packages from before v8.1 kept the fonts in .\fonts
         $fd = Join-Path $to "assets\fonts"
         New-Item -ItemType Directory -Force -Path $fd | Out-Null
-        foreach ($ff in Get-ChildItem $fs -File) { [void](Copy-IfChanged $ff.FullName (Join-Path $fd $ff.Name)) }
+        foreach ($ff in Get-ChildItem (Join-Path $from "fonts") -File) { [void](Copy-IfChanged $ff.FullName (Join-Path $fd $ff.Name)) }
     }
     return $ok
 }
@@ -3793,9 +3796,10 @@ function Build-Page-finish($p) {
 # small page.
 function Build-Page-home($p) {
     $y = 4
-    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 150 @("work")))
-    $y += 162
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 124 @("work")))
+    $y += 134
     $rows = @(
+        @("How to use", { "3-minute tour" }, "tour"),
         @("Appearance", { "{0}  |  {1}" -f (Get-CurrentThemeName), $Script:Cfg.Shape }, "appearance"),
         @("Widget", { $n = @("AlwaysOnTop", "HideFromCapture", "AutoHide", "Sounds") | Where-Object { $Script:Cfg[$_] }; "{0} on" -f @($n).Count }, "behaviour"),
         @("Focus and breaks", { "{0} min focus  |  {1} min breaks" -f $Script:Cfg.FocusMinutes, $Script:Cfg.BreakLimitMinutes }, "focusbreaks"),
@@ -3861,6 +3865,278 @@ function Build-Page-focusbreaks($p) {
     return "Focus and breaks"
 }
 
+# ---------------------------------------------------------------------------
+#  HOW TO USE: a guided tour that plays inside Settings, over real screenshots
+#  (assets\tour). r = the highlighted area [x, y, w, h] in the picture's pixels.
+# ---------------------------------------------------------------------------
+$Script:TourScenes = @(
+    @{ ch = "Get started"; img = "hub-setup-welcome"; r = @(325, 752, 145, 50); t = "Install it"; d = "Double-click Install Everhour Widget.vbs. A short setup opens; press Get started." }
+    @{ ch = "Get started"; img = "hub-setup-connect"; r = @(30, 188, 440, 205); t = "Find your API token"; d = "In Everhour: your name (bottom-left), My Profile, Application Access, then copy the API Token." }
+    @{ ch = "Get started"; img = "hub-setup-connect"; r = @(30, 398, 440, 48); t = "Paste and connect"; d = "Paste the token and press Connect. If it's on your clipboard, it fills in by itself." }
+    @{ ch = "Get started"; img = "hub-setup-theme"; r = @(30, 160, 440, 190); t = "Make it yours"; d = "Pick a theme, shape, font, text size, work hours, breaks and daily target. Each answer saves at once." }
+    @{ ch = "Get started"; img = "hub-setup-finish"; r = @(30, 318, 440, 66); t = "Start tracking"; d = "Press Start tracking. From now on the widget starts with Windows by itself." }
+    @{ ch = "The widget"; img = "large-running"; r = @(316, 57, 56, 56); t = "Start and stop"; d = "The round button starts or stops the timer. When nothing runs, it resumes your last task." }
+    @{ ch = "The widget"; img = "large-running"; r = @(56, 108, 262, 100); t = "What you're tracking"; d = "The running task and its timer." }
+    @{ ch = "The widget"; img = "large-running"; r = @(56, 184, 316, 48); t = "Today's progress"; d = "Time tracked today, filling up towards your daily target." }
+    @{ ch = "The widget"; img = "large-running"; r = @(44, 44, 342, 606); t = "Edge lights"; d = "The dots round the border complete one lap every minute, on tasks and on breaks." }
+    @{ ch = "Today and This week"; img = "large-running"; r = @(56, 254, 320, 178); t = "Today"; d = "Every task you tracked today. Double-click one to start it again; scroll for more." }
+    @{ ch = "Today and This week"; img = "large-week-scrolled"; r = @(56, 286, 330, 214); t = "This week"; d = "Click This week for the whole week. Only one list is open at a time." }
+    @{ ch = "Today and This week"; img = "large-groups-closed"; r = @(56, 252, 320, 72); t = "Close both"; d = "Click a heading to close its list; the widget gets shorter." }
+    @{ ch = "Start, stop, switch"; img = "large-running"; r = @(56, 474, 320, 112); t = "Quick switch"; d = "Your favourite tasks, one click to start. Pin up to five with the star in the task picker." }
+    @{ ch = "Start, stop, switch"; img = "large-running"; r = @(56, 594, 320, 46); t = "Switch, Stop, Settings"; d = "Switch opens the task picker: recent tasks, live search and a note." }
+    @{ ch = "Start, stop, switch"; mock = "keys"; t = "From anywhere"; d = "Press Ctrl + Alt + E in any app to start or stop, even when the widget is hidden." }
+    @{ ch = "Start, stop, switch"; mock = "menu"; t = "Right-click for more"; d = "Favourites, focus, edit note, add missed time, hide names, shape, settings and this tour." }
+    @{ ch = "Colours"; img = "large-break"; r = @(44, 44, 342, 606); t = "On a break"; d = "Teal with a steaming cup. The bar shows how much of today's break allowance you've used." }
+    @{ ch = "Colours"; img = "large-overbreak"; r = @(44, 44, 342, 606); t = "Break over the limit"; d = "Red-orange with chasing lights and an alert. Time to get back." }
+    @{ ch = "Colours"; img = "large-stopped"; r = @(56, 108, 300, 104); t = "No timer running"; d = "The widget turns red and counts how long the timer has been off." }
+    @{ ch = "Focus"; img = "large-focus"; r = @(56, 64, 232, 40); t = "Focus sessions"; d = "Right-click, Focus, 25 or 50 min. The lights count down, then a chime and a break." }
+    @{ ch = "Privacy"; img = "large-privacy"; r = @(282, 68, 36, 34); t = "Hide names and times"; d = "Click the eye and everything turns into dots. Also hidden from screen sharing." }
+    @{ ch = "Shapes"; img = "square-running"; r = $null; t = "Square"; d = "A compact square. Click it to open the lists." }
+    @{ ch = "Shapes"; img = "wide-running"; r = $null; t = "Wide"; d = "A slim bar for the top or bottom of the screen." }
+    @{ ch = "Shapes"; img = "peek-stopped"; r = $null; t = "Auto-hide"; d = "The widget slides into the screen edge; this strip keeps showing the status. Hover it to bring it back." }
+    @{ ch = "Settings"; img = "hub-settings-home"; r = @(30, 272, 440, 456); t = "Settings"; d = "Short pages; every change saves and shows on the widget at once." }
+    @{ ch = "Settings"; img = "hub-settings-appearance"; r = @(30, 92, 440, 170); t = "Appearance"; d = "Six themes, three shapes, twelve fonts, text size and background." }
+    @{ ch = "Settings"; img = "hub-settings-workday"; r = @(30, 166, 440, 190); t = "Work hours"; d = "Scroll the wheels to set your hours, then pick your days and reminders." }
+    @{ ch = "Updates"; img = "large-update-pill"; r = @(62, 68, 154, 32); t = "Always up to date"; d = "New versions install themselves. If you turned that off, click the Update pill." }
+)
+foreach ($sc in $Script:TourScenes) { $sc.Ms = [Math]::Max(5200, [Math]::Min(9500, 3200 + $sc.d.Length * 38)) }
+
+# Every file the widget needs besides the script; missing ones are fetched.
+$Script:AssetFiles = @("assets/guide.html") + @($Script:TourScenes | Where-Object { $_.img } | ForEach-Object { "assets/tour/$($_.img).png" } | Select-Object -Unique)
+
+$Script:TourImages = @{}
+function Get-TourImage([string]$name) {
+    if ($Script:TourImages.ContainsKey($name)) { return $Script:TourImages[$name] }
+    $f = Join-Path $ScriptDir "assets\tour\$name.png"
+    if (-not (Test-Path $f)) { return $null }
+    try {
+        # read into memory so the file isn't kept locked (updates replace it)
+        $ms = New-Object System.IO.MemoryStream(, [IO.File]::ReadAllBytes($f))
+        $tmp = [System.Drawing.Image]::FromStream($ms)
+        $bmp = New-Object System.Drawing.Bitmap($tmp)
+        $tmp.Dispose(); $ms.Dispose()
+        $Script:TourImages[$name] = $bmp
+        return $bmp
+    } catch { return $null }
+}
+
+function Build-Page-tour($p) {
+    $H = $Script:Hub
+    $H.Tour = @{ Idx = 0; T0 = $H.Clock.Elapsed.TotalSeconds; Playing = $true; Paused = 0.0; From = $null; Pt = $null }
+    $stage = New-PaintPanel 24 4 352 330
+    $stage.Add_Paint({ param($s, $e) $g = Start-Paint $e; try { Draw-TourStage $g $s.Width $s.Height } catch { } })
+    $stage.Cursor = "Hand"
+    $stage.Add_Click({ Tour-Toggle })
+    [void](Add-HubCtrl $p $stage)
+    $Script:Hub.Stages += $stage
+    $H.TourStage = $stage
+    $H.TourChap = New-Label "" 24 344 352 18 $FontCaps $UI.Accent
+    $H.TourTitle = New-Label "" 24 362 352 28 $FontTitle $UI.Text
+    $H.TourText = New-Label "" 24 392 352 62 $FontUI $UI.Muted
+    foreach ($c in @($H.TourChap, $H.TourTitle, $H.TourText)) { [void](Add-HubCtrl $p $c) }
+    $bPrev = New-FlatButton -Text ([string][char]0x2039) -X 24 -Y 462 -W 52 -H 36
+    $bPrev.Font = $FontTitle
+    $bPrev.Add_Click({ Tour-Go ($Script:Hub.Tour.Idx - 1) })
+    $H.TourPlay = New-FlatButton -Text "Pause" -X 82 -Y 462 -W 96 -H 36 -Primary
+    $H.TourPlay.Add_Click({ Tour-Toggle })
+    $bNext = New-FlatButton -Text ([string][char]0x203A) -X 184 -Y 462 -W 52 -H 36
+    $bNext.Font = $FontTitle
+    $bNext.Add_Click({ Tour-Go ($Script:Hub.Tour.Idx + 1) })
+    $H.TourCount = New-Label "" 244 470 132 22 $FontSmall $UI.Muted
+    $H.TourCount.TextAlign = "MiddleRight"
+    foreach ($c in @($bPrev, $H.TourPlay, $bNext, $H.TourCount)) { [void](Add-HubCtrl $p $c) }
+    # scrub bar: one segment per step, click to jump
+    $bar = New-PaintPanel 24 508 352 14
+    $bar.Cursor = "Hand"
+    $bar.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $n = $Script:TourScenes.Count; $gap = [single](Px 2)
+        $w = ($s.Width - ($n - 1) * $gap) / $n; $h = [single](Px 5); $y = ($s.Height - $h) / 2
+        $T = $Script:Hub.Tour
+        for ($i = 0; $i -lt $n; $i++) {
+            $x = $i * ($w + $gap)
+            Fill-Round $g $UI.Line $x $y $w $h ($h / 2)
+            $frac = if ($i -lt $T.Idx) { 1.0 } elseif ($i -gt $T.Idx) { 0.0 } else { [Math]::Min(1.0, (Get-TourElapsed) / ($Script:TourScenes[$i].Ms / 1000.0)) }
+            if ($frac -gt 0) { Fill-Round $g $UI.Accent $x $y ([Math]::Max($h, $w * $frac)) $h ($h / 2) }
+        }
+    })
+    $bar.Add_MouseClick({ param($s, $e) Tour-Go ([int][Math]::Floor($e.X / $s.Width * $Script:TourScenes.Count)) })
+    [void](Add-HubCtrl $p $bar)
+    $Script:Hub.Stages += $bar
+    if (Test-Path (Join-Path $ScriptDir "assets\guide.html")) {
+        $big = New-FlatButton -Text "Watch it full size in your browser" -X 24 -Y 532 -W 352 -H 32 -Ghost
+        $big.Add_Click({ Open-Guide })
+        [void](Add-HubCtrl $p $big)
+    }
+    Ensure-Assets
+    Tour-Go 0
+    return "How to use"
+}
+
+function Get-TourElapsed {
+    $T = $Script:Hub.Tour
+    if (-not $T.Playing) { return $T.Paused }
+    return $Script:Hub.Clock.Elapsed.TotalSeconds - $T.T0
+}
+
+function Tour-Go([int]$i) {
+    $H = $Script:Hub; $T = $H.Tour
+    if (-not $T) { return }
+    $n = $Script:TourScenes.Count
+    $i = [Math]::Max(0, [Math]::Min($n - 1, $i))
+    $T.From = $T.Pt
+    $T.Idx = $i
+    $T.T0 = $H.Clock.Elapsed.TotalSeconds; $T.Paused = 0.0
+    $sc = $Script:TourScenes[$i]
+    $H.TourChap.Text = $sc.ch.ToUpper()
+    $H.TourTitle.Text = $sc.t
+    $H.TourText.Text = $sc.d
+    $H.TourCount.Text = "Step $($i + 1) of $n"
+    $H.TourStage.Invalidate()
+}
+
+function Tour-Toggle {
+    $T = $Script:Hub.Tour
+    if (-not $T) { return }
+    if ($T.Playing) { $T.Paused = Get-TourElapsed; $T.Playing = $false; $Script:Hub.TourPlay.Text = "Play" }
+    else {
+        if ($T.Idx -eq $Script:TourScenes.Count - 1 -and $T.Paused -ge $Script:TourScenes[$T.Idx].Ms / 1000.0) { Tour-Go 0 }
+        $T.T0 = $Script:Hub.Clock.Elapsed.TotalSeconds - $T.Paused; $T.Playing = $true; $Script:Hub.TourPlay.Text = "Pause"
+    }
+}
+
+# called from the hub clock: move on when a step's time is up
+function Tour-Tick {
+    $H = $Script:Hub; $T = $H.Tour
+    if (-not $T -or $H.PageName -ne "tour" -or -not $T.Playing) { return }
+    if ((Get-TourElapsed) -ge $Script:TourScenes[$T.Idx].Ms / 1000.0) {
+        if ($T.Idx -lt $Script:TourScenes.Count - 1) { Tour-Go ($T.Idx + 1) }
+        else { $T.Paused = $Script:TourScenes[$T.Idx].Ms / 1000.0; $T.Playing = $false; $H.TourPlay.Text = "Replay" }
+    }
+}
+
+function Draw-TourStage($g, [int]$w, [int]$h) {
+    $T = $Script:Hub.Tour
+    $sc = $Script:TourScenes[$T.Idx]
+    $el = Get-TourElapsed
+    Fill-Round $g (ToColor "#14110F") 0 0 ($w - 1) ($h - 1) (Px 14)
+    $acc = $UI.Accent
+    if ($sc.mock -eq "keys") {
+        $keys = @("Ctrl", "Alt", "E"); $kw = @((Px 70), (Px 60), (Px 50)); $kh = [single](Px 52)
+        $total = ($kw | Measure-Object -Sum).Sum + 2 * (Px 36)
+        $x = ($w - $total) / 2; $y = ($h - $kh) / 2 - (Px 10)
+        for ($i = 0; $i -lt 3; $i++) {
+            $down = ($el -ge 0.6 + $i * 0.35 -and $el -lt 2.4)
+            $dy = if ($down) { Px 4 } else { 0 }
+            Fill-Round $g (ToColor "#0A0807") $x ($y + (Px 6)) $kw[$i] $kh (Px 10)
+            Fill-Round $g $(if ($down) { $acc } else { ToColor "#2B2420" }) $x ($y + $dy) $kw[$i] $kh (Px 10)
+            Draw-Text $g $keys[$i] (Get-SceneFont ([single](Px 18)) -Bold) $(if ($down) { ToColor "#1A1410" } else { ToColor "#F3EEE8" }) $x ($y + $dy) $kw[$i] $kh "Center"
+            $x += $kw[$i]
+            if ($i -lt 2) { Draw-Text $g "+" (Get-SceneFont ([single](Px 18)) -Bold) (ToColor "#8D8178") $x $y (Px 36) $kh "Center"; $x += Px 36 }
+        }
+        Draw-Text $g "Works in any app" (Get-SceneFont ([single](Px 13))) (ToColor "#C9BFB5") 0 ($y + $kh + (Px 16)) $w (Px 22) "Center"
+        $T.Pt = $null
+        return
+    }
+    if ($sc.mock -eq "menu") {
+        $items = @("Start a timer...", "Stop timer", "Favourites", "Focus", "-", "Edit note...", "Add missed time...", "Hide names and times", "-", "Shape: switch to square", "Settings...", "How to use...")
+        $mw = [single](Px 220); $ih = [single](Px 22)
+        $mh = ($items | ForEach-Object { if ($_ -eq "-") { Px 9 } else { $ih } } | Measure-Object -Sum).Sum + (Px 12)
+        $mx = ($w - $mw) / 2; $my = ($h - $mh) / 2
+        Fill-Round $g (ToColor "#26201D") $mx $my $mw $mh (Px 8)
+        $real = @($items | Where-Object { $_ -ne "-" })
+        $hi = $real[[int][Math]::Floor([Math]::Max(0, $el - 0.5) / 0.52) % $real.Count]
+        $yy = $my + (Px 6)
+        foreach ($it in $items) {
+            if ($it -eq "-") { Fill-Round $g (ToColor "#3A322D") ($mx + (Px 8)) ($yy + (Px 4)) ($mw - (Px 16)) 1 0; $yy += Px 9; continue }
+            if ($it -eq $hi) { Fill-Round $g (ToColor "#3D342E") ($mx + (Px 4)) $yy ($mw - (Px 8)) $ih (Px 5) }
+            Draw-Text $g $it (Get-SceneFont ([single](Px 12.5))) (ToColor "#ECE6DF") ($mx + (Px 14)) $yy ($mw - (Px 20)) $ih "Left"
+            $yy += $ih
+        }
+        $T.Pt = $null
+        return
+    }
+    $img = Get-TourImage $sc.img
+    if (-not $img) {
+        Draw-Text $g "Getting the tour pictures..." (Get-SceneFont ([single](Px 13))) (ToColor "#C9BFB5") 0 0 $w $h "Center"
+        return
+    }
+    $pad = [single](Px 12)
+    $k = [Math]::Min(($w - 2 * $pad) / $img.Width, ($h - 2 * $pad) / $img.Height)
+    $iw = [single]($img.Width * $k); $ih2 = [single]($img.Height * $k)
+    $dx = [single](($w - $iw) / 2); $dy = [single](($h - $ih2) / 2)
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $g.DrawImage($img, $dx, $dy, $iw, $ih2)
+    $target = New-Object System.Drawing.PointF(($dx + $iw * 0.62), ($dy + $ih2 * 0.55))
+    if ($sc.r) {
+        $r = $sc.r; $sp = [single](Px 4)
+        $rx = $dx + $r[0] * $k - $sp; $ry = $dy + $r[1] * $k - $sp; $rw = $r[2] * $k + 2 * $sp; $rh = $r[3] * $k + 2 * $sp
+        # dim everything but the highlighted part
+        $hole = New-RoundPath $rx $ry $rw $rh (Px 8)
+        $region = New-Object System.Drawing.Region((New-Object System.Drawing.RectangleF($dx, $dy, $iw, $ih2)))
+        $region.Exclude($hole)
+        $dim = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(160, 8, 6, 5))
+        $g.FillRegion($dim, $region); $dim.Dispose(); $region.Dispose()
+        $pen = New-Object System.Drawing.Pen($acc, [single](Px 2)); $g.DrawPath($pen, $hole); $pen.Dispose(); $hole.Dispose()
+        $target = New-Object System.Drawing.PointF(($dx + ($r[0] + [Math]::Min($r[2] * 0.5, 60)) * $k), ($dy + ($r[1] + $r[3] * 0.5) * $k))
+    }
+    # the cursor glides to the highlight, then clicks
+    $from = if ($T.From) { $T.From } else { New-Object System.Drawing.PointF(($w * 0.85), ($h * 0.9)) }
+    $p = Ease (($el - 0.25) / 0.9)
+    $cx = $from.X + ($target.X - $from.X) * $p; $cy = $from.Y + ($target.Y - $from.Y) * $p
+    $T.Pt = New-Object System.Drawing.PointF($cx, $cy)
+    $rp = ($el - 1.25) / 0.7
+    if ($rp -gt 0 -and $rp -lt 1) {
+        $rr = (Px 5) + (Px 22) * $rp
+        $rpen = New-Object System.Drawing.Pen((A ([System.Drawing.Color]::White) ([int](220 * (1 - $rp)))), [single](Px 2.5))
+        $g.DrawEllipse($rpen, ($target.X - $rr), ($target.Y - $rr), (2 * $rr), (2 * $rr)); $rpen.Dispose()
+    }
+    $state = $g.Save()
+    $g.TranslateTransform($cx, $cy); $g.ScaleTransform([single]$Script:Scale, [single]$Script:Scale)
+    Draw-Cursor $g 0 0
+    $g.Restore($state)
+}
+
+# Fetch any shipped file that's missing (e.g. the tour pictures, when an older
+# updater installed this version without them).
+$Script:AssetWorker = {
+    param($Base, $Root, $Files)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $got = 0; $err = ""
+    foreach ($f in $Files) {
+        try {
+            $dst = Join-Path $Root ($f -replace "/", "\")
+            New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
+            Invoke-WebRequest -Uri ($Base + $f) -OutFile "$dst.part" -UseBasicParsing -TimeoutSec 60
+            Move-Item "$dst.part" $dst -Force
+            $got++
+        } catch { $err = $_.Exception.Message }
+    }
+    [pscustomobject]@{ Name = "assets"; Ok = ($err -eq ""); Code = 0; Data = $got; Error = $err }
+}.ToString()
+
+function Ensure-Assets([switch]$Force) {
+    if ($Script:AssetsBusy -or $RenderPreview) { return }
+    if (-not $Force -and $Script:AssetsChecked) { return }
+    $Script:AssetsChecked = $true
+    if (Test-Path (Join-Path $ScriptDir ".git")) { return }
+    $missing = @($Script:AssetFiles | Where-Object { -not (Test-Path (Join-Path $ScriptDir ($_ -replace "/", "\"))) })
+    if ($missing.Count -eq 0) { return }
+    $Script:AssetsBusy = $true
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $Script:Pool
+    [void]$ps.AddScript($Script:AssetWorker).AddArgument("https://raw.githubusercontent.com/Rahul-Undefined/Everhour-Widget/main/").AddArgument($ScriptDir).AddArgument($missing)
+    $h = $ps.BeginInvoke()
+    [void]$Script:Jobs.Add([pscustomobject]@{ PS = $ps; Handle = $h; OnDone = {
+        param($m)
+        $Script:AssetsBusy = $false
+        $r = $m["assets"]
+        if ($r) { Write-Log "Fetched $($r.Data) missing file(s)$(if ($r.Error) { ': ' + $r.Error })" }
+        if ($Script:HubOpen -and $Script:Hub.TourStage -and -not $Script:Hub.TourStage.IsDisposed) { $Script:Hub.TourStage.Invalidate() }
+    } })
+}
+
 function Build-Page-account($p) {
     $H = $Script:Hub
     $y = 4
@@ -3869,7 +4145,7 @@ function Build-Page-account($p) {
     [void](Add-HubCtrl $p $H.AcctLabel); $y += 30
     [void](Add-HubCtrl $p (New-NavRow "Change API token" $null "connect" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Test connection" { Hub-TestConnection } 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-ActionRow "How to use the widget" { Open-Guide } 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-NavRow "How to use the widget" { "3-minute tour" } "tour" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Run the setup guide again" { $Script:Hub.RunSetup = $true; $Script:Hub.Form.Close() } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 62
     [void](Add-HubCtrl $p (New-Caps "Updates" 24 $y)); $y += 22
@@ -4154,6 +4430,7 @@ function Hub-Tick {
         $d = $wh.Tag.Idx - $wh.Tag.Off
         if ([Math]::Abs($d) -gt 0.002) { $wh.Tag.Off += $d * 0.28; $wh.Invalidate() }
     }
+    Tour-Tick
     $H.Frame++
     if ($H.Frame % 3 -eq 0) { foreach ($st in $H.Stages) { if (-not $st.IsDisposed -and $st.Visible) { $st.Invalidate() } } }
 }
@@ -4239,10 +4516,10 @@ function Hub-TestConnection {
 
 function Show-Settings { Show-Hub "settings" | Out-Null }
 
-# The illustrated guide that ships with the widget; the online README if it's missing.
+# The same tour as a full-size page in the browser (shipped with the widget).
 function Open-Guide {
     $g = Join-Path $ScriptDir "assets\guide.html"
-    if (Test-Path $g) { Start-Process $g } else { Start-Process "https://github.com/Rahul-Undefined/Everhour-Widget#readme" }
+    if (Test-Path $g) { Start-Process $g } else { Ensure-Assets -Force }
 }
 
 # ===========================================================================
@@ -4778,7 +5055,7 @@ function Get-NextShape { switch ([string]$Script:Cfg.Shape) { "Large" { return "
 $miSettings = $menu.Items.Add("Settings...")
 $miGuide    = $menu.Items.Add("Setup guide...")
 $miHowTo    = $menu.Items.Add("How to use...")
-$miHowTo.Add_Click({ Open-Guide })
+$miHowTo.Add_Click({ Show-Hub "settings" "tour" | Out-Null })
 $miUpdate   = $menu.Items.Add("Install update")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miExit     = $menu.Items.Add("Exit")
@@ -5047,6 +5324,7 @@ $uiTimer.Add_Tick({
     if (-not $Script:Cfg.AutoHide -and $Script:HideTarget -eq 1) { Show-FromHide }
 
     Check-Focus
+    if (($now - $Script:StartedAt).TotalSeconds -gt 20) { Ensure-Assets }
     # look for a new version 30 s after start, then every 6 hours
     if (($now - $Script:StartedAt).TotalSeconds -gt 30 -and ($now - $Script:UpdCheckedAt).TotalHours -ge 6) { Check-Update }
     if ($Script:AutoInstallPending -and -not $Script:HubOpen -and -not $Script:PickerOpen -and -not $Script:ActionBusy) { $Script:AutoInstallPending = $false; Install-Update }
@@ -5207,7 +5485,7 @@ if ($RenderPreview) {
     [void]$Script:CapQueue.Dequeue()      # setup starts on its first page by itself
     $ct.Start()
     Show-Hub "setup" | Out-Null
-    foreach ($pg in @("appearance", "behaviour", "focusbreaks", "workday", "favourites", "advanced", "account")) { $Script:CapQueue.Enqueue("settings:$pg") }
+    foreach ($pg in @("tour", "appearance", "behaviour", "focusbreaks", "workday", "favourites", "advanced", "account")) { $Script:CapQueue.Enqueue("settings:$pg") }
     $ct.Start()
     Show-Hub "settings" | Out-Null
     foreach ($th in @("Ocean", "Light", "Sunset")) {

@@ -1,4 +1,4 @@
 {
-  "version": "8.5",
-  "notes": "New: a three-minute interactive video tour - right-click the widget, How to use."
+  "version": "8.6",
+  "notes": "The how-to-use tour now plays inside Settings (Settings, How to use). Missing files are fetched automatically."
 }
