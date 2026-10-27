@@ -1,27 +1,46 @@
-EVERHOUR DESKTOP WIDGET  (v4)
+EVERHOUR DESKTOP WIDGET  (v5)
 =============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
-Nothing is installed. No admin rights needed.
+No admin rights needed.
 
 
 SETTING IT UP (one minute, once)
 --------------------------------
-1. Get your personal Everhour API key:
-      Open Everhour -> click your avatar (top right) -> Settings -> API
-      Copy the key.
+Double-click:  Install Everhour Widget.vbs
+   (copies the widget to your user folder and starts it - this folder can
+   be deleted afterwards)
+...or, to run it straight from this folder:  Start Everhour Widget.vbs
 
-2. Double-click:  Start Everhour Widget.vbs
+A short animated guide then shows you exactly where your API token is in
+Everhour (your name at the bottom-left > My Profile > Application Access >
+copy API Token), checks it, and asks a few questions to make the widget
+yours.
 
-3. Paste your key and press Connect. The widget checks the key with
-   Everhour straight away and tells you if it is wrong.
+The widget starts by itself every time you log in to Windows - silently,
+with no black console windows. Nothing appears in your taskbar.
 
-That is it. The widget appears in the bottom-right of your desktop and will
-start by itself every time you log in to Windows. Nothing appears in your
-taskbar - there is no window to accidentally close.
 
-IMPORTANT: always start it with the .vbs file. Do not double-click the
-.ps1 file directly - Windows blocks that by default and nothing happens.
+GIVING IT TO SOMEONE ELSE
+-------------------------
+Run:  Build Share Folder.bat
+It makes  Share\Everhour Widget  and  Share\Everhour Widget.zip.
+Send either one. On their laptop they double-click
+"Install Everhour Widget.vbs". Your API token is NOT included - it lives
+only on your PC.
+
+
+WHAT THE COLOURS MEAN
+---------------------
+  Your theme colour    a timer is running. The dots round the edge fill up
+                       once a minute.
+  Teal, with a cup     you're on a break (a task whose name contains
+                       "break" or "lunch" - change the words in Settings).
+                       The bar shows how much of your daily break is used.
+  Red / orange, fast   your breaks today went over the allowance (1 hour by
+                       default).
+  Red, a dot circling  no timer is running. The big timer shows how long
+                       it has been off.
 
 
 USING IT
@@ -30,67 +49,49 @@ USING IT
                      last task you tracked (hover it to see which one).
   Click              expand: today's time task by task, this week's total,
                      and Start / Stop / Settings buttons.
-                     (it shrinks back on its own once you move away)
   Click and drag     move it anywhere, on any monitor - it remembers the spot
-  Right-click        menu: start a timer, resume, stop, refresh, open
-                     Everhour, settings, exit
+  Right-click        menu: start, resume, stop, refresh, open Everhour,
+                     switch wide/square, settings, setup guide, exit
   Ctrl+Alt+E         start / stop from anywhere (change it in Settings)
-
-The bar under the timer fills up towards your daily target (8h by default).
-If Everhour can't be reached, a small "offline" tag appears and the timer
-keeps counting.
 
 
 MAKING IT YOURS
 ---------------
-Right-click -> Settings. Pick a ready-made theme (Graphite, Midnight,
-Forest, Sunset, Light) or set every colour yourself; background opacity,
-font, size, corner roundness; daily target; refresh speed; the keyboard
-shortcut; and reminders when no timer is running in your work hours and
-work days.
+Right-click -> Settings:
+  - Shape: Wide or Square (phone-widget style)
+  - Themes: Graphite, Ocean, Midnight, Forest, Sunset, Light - or any colours
+  - Fonts: Inter (iPhone style), Doto (Nothing dot-matrix), Space Grotesk,
+    Geist, Poppins and more; the timer can use its own font
+  - Animations, edge lights, red-when-stopped, break allowance and words
+  - Hide from screen sharing and screenshots (on by default): people in
+    your Teams / Zoom / Meet calls won't see the widget
+  - Daily target, refresh speed, shortcut, reminders, work hours and days
 
 Changes show on the widget as you make them. Save keeps them, Cancel puts
-everything back, Reset returns to the defaults.
+everything back.
 
 
 CHECKING IT WILL START WHEN YOU POWER ON
 ----------------------------------------
 Run:  Test Autostart Now.bat
 
-It closes the widget, then starts it again using the exact command Windows
-runs at login, and tells you PASS or FAIL. No reboot needed to find out.
-
 
 IF IT DOES NOT APPEAR
 ---------------------
-Run:  Troubleshoot.bat
-
-It checks this PC, the startup entry and your API key, and says plainly
-whether autostart is configured and whether your key works. It saves
-troubleshoot-log.txt - send that file to whoever gave you this.
-(The log never contains your API key.)
+Run:  Troubleshoot.bat  - it saves troubleshoot-log.txt (never contains
+your token). Send that file to whoever gave you this.
 
 
-YOUR KEY AND YOUR DATA
-----------------------
-Your API key is stored only on this PC, encrypted for your Windows user,
-in:
-    %APPDATA%\EverhourWidget\config.json
-It is sent only to api.everhour.com. The widget only ever sees your own
-time - not your colleagues.
+YOUR TOKEN AND YOUR DATA
+------------------------
+Your API token is stored only on this PC, encrypted for your Windows user,
+in  %APPDATA%\EverhourWidget\config.json.  It is sent only to
+api.everhour.com. The widget only ever sees your own time.
 
-Do not share your API key. To revoke it, go to Everhour -> Settings -> API.
+To revoke it: Everhour -> My Profile -> Application Access -> Reset Token.
 
 
 TURNING IT OFF
 --------------
-  Just for now          right-click the widget -> Exit
-                        (or run Stop Widget.bat)
-  Stop it starting up   right-click -> Settings -> turn off
-                        "Start automatically when Windows starts"
-
-
-MOVING THIS FOLDER
-------------------
-Safe to move. Start the widget once from the new location and it updates
-its own startup entry automatically.
+  Just for now          right-click the widget -> Exit (or Stop Widget.bat)
+  Stop it starting up   Settings -> turn off "Start automatically..."

@@ -1,0 +1,16 @@
+Fonts bundled with Everhour Widget
+==================================
+
+All fonts in this folder are free, open-source fonts downloaded from
+Google Fonts, licensed under the SIL Open Font License 1.1, which allows
+bundling and redistribution with software:  https://openfontlicense.org
+
+  Inter, Geist, Doto, Space Grotesk, Space Mono, Poppins, Manrope, Outfit,
+  Plus Jakarta Sans, Sora, DM Sans, JetBrains Mono
+
+Each font's page, with its authors and full licence text:
+  https://fonts.google.com/specimen/<Font+Name>   (e.g. .../specimen/Space+Grotesk)
+
+The fonts are loaded privately by the widget; nothing is installed on the PC.
+Apple's SF Pro and Nothing's NDot cannot be redistributed, so Inter and Doto
+are used as the closest open alternatives.

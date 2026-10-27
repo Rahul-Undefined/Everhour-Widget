@@ -3,4 +3,7 @@
 Set sh = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 here = fso.GetParentFolderName(WScript.ScriptFullName)
-sh.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -File """ & here & "\EverhourWidget.ps1""", 0, False
+cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & here & "\EverhourWidget.ps1"""
+' conhost --headless creates no window, even when Windows Terminal is the default terminal
+If fso.FileExists(sh.ExpandEnvironmentStrings("%WINDIR%") & "\System32\conhost.exe") Then cmd = "conhost.exe --headless " & cmd
+sh.Run cmd, 0, False
