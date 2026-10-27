@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v8.2
+    EverhourWidget.ps1  -  v8.3
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.2"
+$Script:Version = "8.3"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -565,6 +565,7 @@ $Script:Defaults = [ordered]@{
     BreakTaskId         = ""      # learned from the last break task you ran
     BreakTaskName       = ""
     AutoUpdate          = $true
+    PrivacyMode         = $false  # eye on the widget: hide task names and times
 }
 
 $Script:Themes = [ordered]@{
@@ -2717,6 +2718,15 @@ function Build-Frame($Pal, [string]$Mode) {
     }
     Add-Hit "toggle" ($btnX + $M) ($btnY + $M) $btnD $btnD
 
+    # ---------- privacy eye ----------
+    $es = [single](Px 9)
+    if ($square) { $ex = $btnX - (Px 18); $eyc = $btnY + $btnD / 2; $capsRect[2] -= (Px 26) }
+    else { $ex = $W - (Px 20); $eyc = (Px 10) }
+    $hovE = ($Script:Hover -eq "eye")
+    if ($hovE) { Fill-Circle $g (A $Pal.Muted 60) $ex $eyc ($es * 1.25) }
+    Draw-Eye $g $(if ($cfg.PrivacyMode) { $Pal.Accent } elseif ($hovE) { $Pal.Task } else { $Pal.Muted }) $ex $eyc $es ([bool]$cfg.PrivacyMode)
+    Add-Hit "eye" ($ex - $es * 1.3 + $M) ($eyc - $es * 1.3 + $M) ($es * 2.6) ($es * 2.6)
+
     # ---------- status chip ----------
     $chip = ""; $chipC = $Pal.Error; $chipHit = ""
     if ($Script:Toast -and $now -lt $Script:ToastUntil) {
@@ -2746,6 +2756,12 @@ function Build-Frame($Pal, [string]$Mode) {
     $timeC = A $Pal.Time 115
     if ($Script:IsRunning) { $timeText = Format-HMS (Get-LiveElapsed); $timeC = $Pal.Time }
     elseif ($stoppedShow) { $timeText = Format-HMS (($now - $Script:StoppedSince).TotalSeconds); $timeC = $Pal.Time }
+    if ($cfg.PrivacyMode) {
+        if ($Script:TaskName -and $l1 -eq $Script:TaskName) { $l1 = Hide-Name $l1 }
+        elseif ($l1 -like "Resume  *") { $l1 = "Resume  " + (Hide-Name $cfg.LastTaskName) }
+        $l1 = Hide-Num $l1
+        $timeText = Hide-Num $timeText
+    }
 
     if ($square) {
         $caps = switch ($Mode) { "work" { "TRACKING" } "break" { "ON BREAK" } "overbreak" { "BREAK OVER" } "stopped" { "TIMER OFF" } default { "EVERHOUR" } }
@@ -2769,7 +2785,7 @@ function Build-Frame($Pal, [string]$Mode) {
         } else {
             Draw-Text $g $caps $F.Caps $Pal.Muted $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
         }
-        if ($stoppedShow -and -not $hovBtn) { $l1 = "Off since " + $Script:StoppedSince.ToString("h:mm tt") }
+        if ($stoppedShow -and -not $hovBtn) { $l1 = Hide-Num ("Off since " + $Script:StoppedSince.ToString("h:mm tt")) }
         Draw-Text $g $l1 $l1F $l1C $line1[0] $line1[1] $line1[2] $line1[3] "Left"
         Draw-Text $g $timeText $timeFont $timeC $timeRect[0] $timeRect[1] $timeRect[2] $timeRect[3] "Left"
         if ($showToday -or $isBreak) {
@@ -2780,6 +2796,7 @@ function Build-Frame($Pal, [string]$Mode) {
                 $main = if ($hasToday) { Format-Short $today } else { "--" }
                 $suffix = if ($target -gt 0) { "  of " + (Format-Target $target) + " today" } else { "  today" }
             }
+            $main = Hide-Num $main; $suffix = Hide-Num $suffix
             $mw = Measure-W $main $F.SmallBold
             Draw-Text $g $main $F.SmallBold $Pal.Task $P $todayY ($mw + (Px 2)) $hS "Left"
             Draw-Text $g $suffix $F.Small $Pal.Muted ($P + $mw) $todayY ($W - 2 * $P - $mw) $hS "Left"
@@ -2809,6 +2826,7 @@ function Build-Frame($Pal, [string]$Mode) {
                 $main = if ($hasToday) { Format-Short $today } else { "--" }
                 $suffix = if ($target -gt 0) { " / " + (Format-Target $target) } else { " today" }
             }
+            $main = Hide-Num $main; $suffix = Hide-Num $suffix
             $sw = Measure-W $suffix $F.Small
             $mw = Measure-W $main $F.SmallBold
             $xr = $W - $P
@@ -2878,7 +2896,7 @@ function Build-Frame($Pal, [string]$Mode) {
             $label = if ($grp -eq "today") { "TODAY" } else { "THIS WEEK" }
             Draw-Text $g $label $F.Caps $(if ($isOpen) { $Pal.Task } else { $Pal.Muted }) ($P + (Px 14)) $ey ($W / 2) $grpH "Left"
             $tot = if ($grp -eq "today") { if ($hasToday) { Format-Short $today } else { "--" } } else { $wk = Get-WeekTotal; if ($wk -ge 0) { Format-Short $wk } else { "--" } }
-            Draw-Text $g $tot $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $grpH "Right"
+            Draw-Text $g (Hide-Num $tot) $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $grpH "Right"
             Add-Hit "grp:$grp" ($P - (Px 6) + $M) ($ey + $M) ($W - 2 * $P + (Px 12)) $grpH
             $ey += $grpH
             if (-not $isOpen) { continue }
@@ -2898,9 +2916,9 @@ function Build-Frame($Pal, [string]$Mode) {
                 if ($hovR) { Fill-Round $g (A $Pal.Muted 34) ($P - (Px 6)) ($ey - (Px 3)) ($W - 2 * $P + (Px 12)) ($rowH - (Px 1)) (Px 7) }
                 $nc = if ($row.Running) { $Pal.Time } else { $Pal.Task }
                 $nf = if ($row.Running) { $F.TaskBold } else { $F.Task }
-                Draw-Text $g $row.Name $nf $nc $P $ey ($W - 2 * $P - $durW) $hT "Left"
+                Draw-Text $g (Hide-Name $row.Name) $nf $nc $P $ey ($W - 2 * $P - $durW) $hT "Left"
                 $dc = if ($row.Running) { $Pal.Accent } else { $Pal.Task }
-                $durText = if ($hovR -and -not $row.Running) { "start" } else { Format-Short $row.Sec }
+                $durText = if ($hovR -and -not $row.Running) { "start" } else { Hide-Num (Format-Short $row.Sec) }
                 if ($hovR -and -not $row.Running) { $dc = $Pal.Accent }
                 Draw-Text $g $durText $F.Task $dc ($W - $P - $durW) $ey $durW $hT "Right"
                 $by = $ey + $hT + (Px 2); $bhh = [single][Math]::Max(2, (Px 3))
@@ -2932,7 +2950,7 @@ function Build-Frame($Pal, [string]$Mode) {
                 $hov = ($Script:Hover -eq "fav:$($it.I)")
                 $bg = if ($on) { A $Pal.Accent 150 } elseif ($hov) { A $Pal.Muted 95 } else { A $Pal.Muted 45 }
                 Fill-Round $g $bg $cx0 $cy0 $it.W $favL.Ch ($favL.Ch / 2)
-                Draw-Text $g $it.Name $F.Small $(if ($on) { $Pal.Time } else { $Pal.Task }) ($cx0 + (Px 8)) $cy0 ($it.W - (Px 16)) $favL.Ch "Center"
+                Draw-Text $g (Hide-Name $it.Name) $F.Small $(if ($on) { $Pal.Time } else { $Pal.Task }) ($cx0 + (Px 8)) $cy0 ($it.W - (Px 16)) $favL.Ch "Center"
                 Add-Hit "fav:$($it.I)" ($cx0 + $M) ($cy0 + $M) $it.W $favL.Ch
             }
             $ey += $favL.H + (Px 10)
@@ -2963,14 +2981,34 @@ function Build-Frame($Pal, [string]$Mode) {
     return $bmp
 }
 
+# ---- privacy: the eye on the widget hides task names and every number ----
+function Hide-Name([string]$s) {
+    if (-not $Script:Cfg.PrivacyMode -or [string]::IsNullOrEmpty($s)) { return $s }
+    return ([string][char]0x2022) * 8
+}
+function Hide-Num([string]$s) {
+    if (-not $Script:Cfg.PrivacyMode -or [string]::IsNullOrEmpty($s)) { return $s }
+    return ($s -replace '\d', [string][char]0x2022)
+}
+function Draw-Eye($g, $color, [single]$cx, [single]$cy, [single]$s, [bool]$closed) {
+    $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.3, $s * 0.16))
+    $pen.StartCap = "Round"; $pen.EndCap = "Round"
+    $p = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $p.AddBezier(($cx - $s), $cy, ($cx - $s * 0.45), ($cy - $s * 0.75), ($cx + $s * 0.45), ($cy - $s * 0.75), ($cx + $s), $cy)
+    $p.AddBezier(($cx + $s), $cy, ($cx + $s * 0.45), ($cy + $s * 0.75), ($cx - $s * 0.45), ($cy + $s * 0.75), ($cx - $s), $cy)
+    $g.DrawPath($pen, $p); $p.Dispose()
+    Fill-Circle $g $color $cx $cy ($s * 0.3)
+    if ($closed) { $g.DrawLine($pen, ($cx - $s * 0.85), ($cy + $s * 0.75), ($cx + $s * 0.85), ($cy - $s * 0.75)) }
+    $pen.Dispose()
+}
 function Get-FavLayout([single]$W, [single]$P) {
     $favs = @(Get-Favs)
     if ($favs.Count -eq 0) { return $null }
     $ch = [single](Px 26); $gap = [single](Px 6); $maxW = $W - 2 * $P
     $x = [single]0; $y = [single]0; $items = @()
     for ($i = 0; $i -lt $favs.Count; $i++) {
-        $nm = [string]$favs[$i].Name
-        $tw = [single][Math]::Min($maxW * 0.62, (Measure-W $nm $Script:F.Small) + (Px 22))
+        $nm = Hide-Name ([string]$favs[$i].Name)
+        $tw =[single][Math]::Min($maxW * 0.62, (Measure-W $nm $Script:F.Small) + (Px 22))
         if ($x -gt 0 -and $x + $tw -gt $maxW) { $x = 0; $y += $ch + $gap }
         $items += [pscustomobject]@{ I = $i; Id = [string]$favs[$i].Id; Name = $nm; X = $x; Y = $y; W = $tw }
         $x += $tw + $gap
@@ -3798,6 +3836,7 @@ function Build-Page-behaviour($p) {
     foreach ($t in @(@("Always on top of other windows", "AlwaysOnTop", ""),
                      @("Hide from screen sharing", "HideFromCapture", "Teams, Zoom and screenshots won't see it"),
                      @("Auto-hide into the screen edge", "AutoHide", "A dot strip stays; hover it to bring the widget back"),
+                     @("Privacy mode", "PrivacyMode", "Hide task names and times - or tap the eye on the widget"),
                      @("Show seconds", "ShowSeconds", ""),
                      @("Show today's progress", "ShowTodayTotal", ""),
                      @("Ask before switching tasks", "ConfirmSwitch", ""),
@@ -4720,6 +4759,8 @@ $miFocus    = New-Object System.Windows.Forms.ToolStripMenuItem("Focus")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miNote     = $menu.Items.Add("Edit note...")
 $miAddTime  = $menu.Items.Add("Add missed time...")
+$miPrivacy  = $menu.Items.Add("Hide names and times")
+$miPrivacy.Add_Click({ Toggle-Cfg "PrivacyMode" })
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miRefresh  = $menu.Items.Add("Refresh now")
 $miOpen     = $menu.Items.Add("Open Everhour")
@@ -4754,6 +4795,7 @@ $menu.Add_Opening({
     $miStart.Text = if ($Script:IsRunning) { "Switch task..." } else { "Start a timer..." }
     $miShape.Text = "Shape: switch to " + (Get-NextShape).ToLower()
     $miNote.Enabled = $Script:IsRunning
+    $miPrivacy.Text = if ($Script:Cfg.PrivacyMode) { "Show names and times" } else { "Hide names and times" }
     $miUpdate.Visible = [bool]$Script:UpdateAvail
     if ($Script:UpdateAvail) { $miUpdate.Text = "Install update (v$($Script:UpdateAvail.Version))" }
 
@@ -4884,6 +4926,7 @@ $form.Add_MouseUp({
         "row:*"      { }    # double-click starts it
         "list"       { }
         "update"     { Install-Update }
+        "eye"        { Toggle-Cfg "PrivacyMode"; Set-Toast $(if ($Script:Cfg.PrivacyMode) { "Hidden" } else { "Visible" }) 2 }
         "b_start"    { Show-TaskPicker }
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
@@ -5178,6 +5221,9 @@ if ($RenderPreview) {
     $Script:ListScroll = 2; Save-Preview "large-week-scrolled"; $Script:ListScroll = 0
     $Script:OpenGroup = ""; Save-Preview "large-groups-closed"
     $Script:OpenGroup = "today"
+    $Script:Cfg.PrivacyMode = $true; Save-Preview "large-privacy"
+    $Script:Cfg.Shape = "Wide"; Apply-Theme; Save-Preview "wide-privacy"; $Script:Cfg.Shape = "Large"; Apply-Theme
+    $Script:Cfg.PrivacyMode = $false
     $Script:UpdateAvail = @{ Version = "8.1"; Notes = "" }; Save-Preview "large-update-pill"
     $Script:Cfg.Shape = "Wide"; Apply-Theme; Save-Preview "wide-update-pill"; $Script:UpdateAvail = $null
     $Script:Cfg.Shape = "Large"; Apply-Theme
