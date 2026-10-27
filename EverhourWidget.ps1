@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v8.3
+    EverhourWidget.ps1  -  v8.4
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.3"
+$Script:Version = "8.4"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -2339,13 +2339,12 @@ function Build-Peek($Pal, [string]$Mode) {
         $cy = $M + (Px 12) + $i * (($h - (Px 24)) / ($n - 1))
         $a = 60
         switch ($Mode) {
-            "work"      {
+            { $_ -eq "work" -or $_ -eq "break" } {
                 $el = Get-LiveElapsed
                 $on = ($i -lt [Math]::Ceiling(($el % 60) / 60.0 * $n))
                 if ([int][Math]::Floor($el / 60) % 2 -eq 1) { $on = -not $on }     # alternate laps, no jump at :00
                 if ($on) { $a = 240 }
             }
-            "break"     { $a = [int](120 + 120 * (0.5 + 0.5 * [Math]::Sin($at * 1.6 - $i * 0.5))) }
             "overbreak" { $a = [int](80 + 175 * (0.5 + 0.5 * [Math]::Sin($at * 6 - $i * 0.9))) }
             "stopped"   { $head = ($at * 3.0) % $n; $d = [Math]::Abs($i - $head); $a = [int]([Math]::Max(50, 255 - $d * 70)) }
         }
@@ -2431,17 +2430,23 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
     $rd = [single][Math]::Max(1.2, (Px 1.5))
     $dim = A $pal.Muted 55
     switch ($mode) {
-        "work" {
-            # One lap per minute, like a seconds hand. Laps alternate: one lap
-            # lights the ring up, the next switches it off behind the head, so
-            # the motion never jumps back to empty at :00. In a focus session
-            # the ring shows the time left draining away instead.
+        { $_ -eq "work" -or $_ -eq "break" } {
+            # One lap per minute, like a seconds hand - while working and on a
+            # break alike (the break's allowance is on the bar below). Laps
+            # alternate: one lap lights the ring up, the next switches it off
+            # behind the head, so the motion never jumps back to empty at :00.
+            # In a focus session (or its break) the ring shows the time left
+            # draining away instead.
             $el = Get-LiveElapsed
             $lit = ($el % 60) / 60.0 * $n
             $fillLap = ([int][Math]::Floor($el / 60) % 2 -eq 0)
-            if ($Script:FocusPhase -eq "focus") { $lit = (Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * ($n - 1); $fillLap = $true }
+            if (($mode -eq "work" -and $Script:FocusPhase -eq "focus") -or ($mode -eq "break" -and $Script:FocusPhase -eq "rest")) {
+                $lit = (Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * ($n - 1); $fillLap = $true
+            }
             $full = [int][Math]::Min($n - 1, [Math]::Floor($lit))
-            $on = A $pal.Dot 235
+            $onA = 235
+            if ($mode -eq "break") { $onA = [int](200 + 55 * [Math]::Sin($at * 2 * [Math]::PI / 4)) }    # gentle breathing on a break
+            $on = A $pal.Dot $onA
             if ($fillLap) {
                 Fill-DotRun $g $on $dots 0 ($full - 1) $rd
                 Fill-DotRun $g $dim $dots ($full + 1) ($n - 1) $rd
@@ -2452,14 +2457,6 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
             $hd = $dots[$full]
             Fill-Circle $g (A $pal.Dot ([int](110 + 145 * ($lit - [Math]::Floor($lit))))) $hd.X $hd.Y ($rd * 1.15)
             Fill-Circle $g (A $pal.Glow 75) $hd.X $hd.Y ($rd * 2.8)
-        }
-        "break" {
-            $limit = [Math]::Max(1, [double]$Script:Cfg.BreakLimitMinutes * 60)
-            $lit = [int][Math]::Ceiling([Math]::Min(1.0, (Get-BreakTotal) / $limit) * $n)
-            if ($Script:FocusPhase -eq "rest") { $lit = [int][Math]::Ceiling((Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * $n) }
-            $breath = 0.75 + 0.25 * [Math]::Sin($at * 2 * [Math]::PI / 4)
-            Fill-DotRun $g (A $pal.Dot ([int](235 * $breath))) $dots 0 ($lit - 1) $rd
-            Fill-DotRun $g $dim $dots $lit ($n - 1) $rd
         }
         "overbreak" {
             # a bright wave chasing round the edge, in 4 brightness bands

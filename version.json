@@ -1,4 +1,4 @@
 {
-  "version": "8.3",
-  "notes": "Privacy eye on the widget: one click hides task names and times. Settings in small pages."
+  "version": "8.4",
+  "notes": "The edge lights now circle every minute on breaks too, not only on tasks."
 }
