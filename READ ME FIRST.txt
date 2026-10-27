@@ -102,3 +102,26 @@ TURNING IT OFF
 --------------
   Just for now          right-click the widget -> Exit (or Stop Widget.bat)
   Stop it starting up   Settings -> turn off "Start automatically..."
+
+
+FAVOURITES, FOCUS AND MORE  (right-click the widget)
+----------------------------------------------------
+  Favourites         star up to 5 tasks in the task picker; they show as
+                     one-click "Quick switch" chips on the widget
+  Focus              25 / 50 min focus session; the edge lights count down,
+                     then a chime and a break (it can switch to your break
+                     task and back for you - Settings -> Focus sessions)
+  Edit note...       change the note on the running entry
+  Add missed time... add time you forgot to track, to any task and day
+  Sounds             soft chimes; turn off in Settings -> Widget
+
+
+UPDATES
+-------
+From version 7 the widget updates itself: when a new version is out you
+get a "Widget update available" message - click it (or right-click ->
+Install update). Settings and token are kept.
+
+Still on version 6 or older? Download the new zip, unzip it and
+double-click "Install Everhour Widget.vbs" once. After that, updates are
+automatic.

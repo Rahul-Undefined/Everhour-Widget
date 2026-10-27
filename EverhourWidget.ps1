@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v6
+    EverhourWidget.ps1  -  v7
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "6.0"
+$Script:Version = "7.0"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -94,6 +94,33 @@ public static class EhWin {
 
     // Puts a 32-bit ARGB bitmap on screen as the whole window: real
     // anti-aliased corners, soft shadow, see-through background, crisp text.
+    // A soft chime: a few sine notes with a quick fade, as a WAV in memory.
+    public static byte[] Tone(double[] freqs, double noteSec, double vol) {
+        int rate = 22050, per = (int)(rate * noteSec);
+        int n = per * freqs.Length + rate / 3;
+        short[] pcm = new short[n];
+        for (int k = 0; k < freqs.Length; k++) {
+            int off = k * per;
+            for (int i = 0; off + i < n; i++) {
+                double t = (double)i / rate;
+                double env = Math.Min(1.0, t / 0.006) * Math.Exp(-t * 7.0);
+                if (env < 0.001 && t > 0.05) { break; }
+                double s = Math.Sin(2 * Math.PI * freqs[k] * t) * 0.85 + Math.Sin(4 * Math.PI * freqs[k] * t) * 0.15;
+                int v = pcm[off + i] + (int)(s * env * vol * 32767);
+                pcm[off + i] = (short)Math.Max(-32767, Math.Min(32767, v));
+            }
+        }
+        System.IO.MemoryStream ms = new System.IO.MemoryStream();
+        System.IO.BinaryWriter w = new System.IO.BinaryWriter(ms);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + n * 2);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("WAVEfmt ")); w.Write(16); w.Write((short)1); w.Write((short)1);
+        w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+        w.Write(System.Text.Encoding.ASCII.GetBytes("data")); w.Write(n * 2);
+        foreach (short s in pcm) { w.Write(s); }
+        w.Flush();
+        return ms.ToArray();
+    }
+
     public static bool PushLayered(IntPtr hwnd, Bitmap bmp, int x, int y) {
         IntPtr screen = GetDC(IntPtr.Zero);
         IntPtr mem = CreateCompatibleDC(screen);
@@ -493,6 +520,14 @@ $Script:Defaults = [ordered]@{
     LastTaskId          = ""
     LastTaskName        = ""
     LastStopAt          = ""
+    Favorites           = @()     # pinned tasks: @{ Id; Name }, up to 5
+    Sounds              = $true
+    FocusMinutes        = 25
+    FocusBreakMinutes   = 5
+    FocusAutoBreak      = $true   # switch to your break task and back
+    BreakTaskId         = ""      # learned from the last break task you ran
+    BreakTaskName       = ""
+    AutoUpdate          = $true
 }
 
 $Script:Themes = [ordered]@{
@@ -563,6 +598,10 @@ function Normalize-Config {
     if (-not (Parse-HHmm $c.WorkEnd))   { $c.WorkEnd   = "18:30" }
     if ($null -eq $c.WorkDays) { $c.WorkDays = "Mon,Tue,Wed,Thu,Fri" }
     if ($null -eq $c.BreakKeywords) { $c.BreakKeywords = "break, lunch" }
+    try { $c.FocusMinutes      = [int](Limit $c.FocusMinutes 5 180) }      catch { $c.FocusMinutes = 25 }
+    try { $c.FocusBreakMinutes = [int](Limit $c.FocusBreakMinutes 0 60) }  catch { $c.FocusBreakMinutes = 5 }
+    $c.Favorites = @(@($c.Favorites) | Where-Object { $_ -and $_.Id } | Select-Object -First 5 |
+        ForEach-Object { [pscustomobject]@{ Id = [string]$_.Id; Name = [string]$_.Name } })
 }
 
 function Save-Config {
@@ -1091,11 +1130,18 @@ function Apply-TimerData($d) {
         $Script:TaskName     = [string]$d.task.name
         $Script:BaseDuration = 0; try { $Script:BaseDuration = [int]$d.duration } catch { }
         $Script:TimerToday   = 0; try { $Script:TimerToday = [int]$d.today } catch { }
+        $Script:TimerComment = [string]$d.comment
         $Script:LastPollAt   = Get-Date
         $Script:LastRunAt    = Get-Date
         if ($Script:Cfg.LastTaskId -ne $Script:TaskId -or $Script:Cfg.LastTaskName -ne $Script:TaskName) {
             $Script:Cfg.LastTaskId = $Script:TaskId
             $Script:Cfg.LastTaskName = $Script:TaskName
+            Save-Config
+        }
+        # remember the break task, so focus sessions can switch to it for you
+        if ((Test-IsBreak $Script:TaskName) -and $Script:Cfg.BreakTaskId -ne $Script:TaskId) {
+            $Script:Cfg.BreakTaskId = $Script:TaskId
+            $Script:Cfg.BreakTaskName = $Script:TaskName
             Save-Config
         }
     } else {
@@ -1209,11 +1255,12 @@ function On-Records($m) {
 # ===========================================================================
 #  TIMER ACTIONS
 # ===========================================================================
-function Start-Timer([string]$TaskId, [string]$TaskName, [string]$Comment) {
+function Start-Timer([string]$TaskId, [string]$TaskName, [string]$Comment, [string]$DoneText = "Started") {
     if ($Script:ActionBusy -or -not $TaskId) { return }
     $Script:ActionBusy = $true
     $body = @{ task = $TaskId; userDate = (Get-Date).ToString("yyyy-MM-dd") }
     if (-not [string]::IsNullOrWhiteSpace($Comment)) { $body.comment = $Comment.Trim() }
+    $Script:StartDoneText = $DoneText
     Set-Toast "Starting..." 20
     Invoke-Api -Requests @(@{ Name = "start"; Path = "/timers"; Method = "Post"; Body = $body }) -OnDone {
         param($m)
@@ -1222,7 +1269,8 @@ function Start-Timer([string]$TaskId, [string]$TaskName, [string]$Comment) {
         if ($r -and $r.Ok) {
             if ($r.Data -and $r.Data.status -eq "active") { Apply-TimerData $r.Data }
             $Script:LastError = ""
-            Set-Toast "Started" 2
+            Play-Sound "start"
+            Set-Toast $Script:StartDoneText 2
         } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
             Set-Toast "Key rejected" 5 -IsError
         } else {
@@ -1242,6 +1290,8 @@ function Stop-Timer {
         $r = $m["stop"]
         if ($r -and $r.Ok) {
             Apply-TimerData $null
+            if ($Script:FocusPhase -eq "focus") { $Script:FocusPhase = "" }    # stopping ends the focus session
+            Play-Sound "stop"
             Set-Toast "Timer stopped" 2
         } else {
             Set-Toast "Couldn't stop the timer" 5 -IsError
@@ -1258,6 +1308,269 @@ function Resume-LastTask {
 function Toggle-Timer {
     if ($Script:LastError -eq "AUTH") { Change-ApiKey | Out-Null; return }
     if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask }
+}
+
+# ===========================================================================
+#  SOUNDS  (short chimes made on the fly - no sound files)
+# ===========================================================================
+$Script:SoundDefs = @{
+    start = @(@(659.25, 987.77), 0.10)
+    stop  = @(@(783.99, 523.25), 0.11)
+    soft  = @(@(587.33, 783.99), 0.12)
+    chime = @(@(523.25, 659.25, 783.99, 1046.5), 0.10)
+    alert = @(@(880.0, 0.0, 880.0, 0.0, 880.0), 0.09)
+}
+$Script:SoundCache = @{}
+function Play-Sound([string]$name) {
+    if (-not $Script:Cfg.Sounds -or -not $Script:HasWinApi -or $RenderPreview) { return }
+    try {
+        if (-not $Script:SoundCache.ContainsKey($name)) {
+            $def = $Script:SoundDefs[$name]
+            $Script:SoundCache[$name] = [EhWin]::Tone([double[]]$def[0], [double]$def[1], 0.22)
+        }
+        $Script:Player = New-Object System.Media.SoundPlayer((New-Object System.IO.MemoryStream(, $Script:SoundCache[$name])))
+        $Script:Player.Play()
+    } catch { }
+}
+
+# ===========================================================================
+#  FAVOURITE TASKS  (one-click chips on the widget)
+# ===========================================================================
+function Get-Favs { return @(@($Script:Cfg.Favorites) | Where-Object { $_ -and $_.Id }) }
+function Test-Fav([string]$id) { return [bool](Get-Favs | Where-Object { $_.Id -eq $id }) }
+function Toggle-Fav([string]$id, [string]$name) {
+    if (Test-Fav $id) {
+        $Script:Cfg.Favorites = @(Get-Favs | Where-Object { $_.Id -ne $id })
+        Set-Toast "Removed from favourites" 2
+    } else {
+        if ((Get-Favs).Count -ge 5) { Set-Toast "Up to 5 favourites" 3 -IsError; return }
+        $Script:Cfg.Favorites = @(Get-Favs) + [pscustomobject]@{ Id = $id; Name = $name }
+        Set-Toast "Added to favourites" 2
+    }
+    Save-Config
+    Render
+}
+function Start-Fav([int]$i) {
+    $favs = Get-Favs
+    if ($i -lt 0 -or $i -ge $favs.Count) { return }
+    $f = $favs[$i]
+    if ($Script:IsRunning -and $Script:TaskId -eq $f.Id) { return }
+    if ($Script:IsRunning -and $Script:Cfg.ConfirmSwitch) {
+        if (-not (Show-Message "Switch task?" "Stop '$($Script:TaskName)' and start '$($f.Name)'?" "Switch" "Cancel")) { return }
+    }
+    Start-Timer $f.Id $f.Name ""
+}
+
+# ===========================================================================
+#  FOCUS SESSIONS  (e.g. 25 min work, 5 min break, switching tasks for you)
+# ===========================================================================
+$Script:FocusPhase = ""          # "", focus, rest
+$Script:FocusEnd = [DateTime]::MinValue
+$Script:FocusLen = 1
+$Script:FocusWork = $null
+
+function Start-Focus([int]$min = 0) {
+    if ($min -le 0) { $min = [int]$Script:Cfg.FocusMinutes }
+    $Script:FocusPhase = "focus"
+    $Script:FocusLen = $min * 60
+    $Script:FocusEnd = (Get-Date).AddMinutes($min)
+    $Script:FocusWork = $null
+    if (-not $Script:IsRunning) { Resume-LastTask } else { Play-Sound "start" }
+    Set-Toast "Focus $min min" 3
+}
+function Stop-Focus { $Script:FocusPhase = ""; Set-Toast "Focus ended" 2 }
+
+function Get-FocusLeft { return [Math]::Max(0, ($Script:FocusEnd - (Get-Date)).TotalSeconds) }
+function Get-FocusLabel {
+    if (-not $Script:FocusPhase) { return "" }
+    $left = Get-FocusLeft
+    $txt = if ($left -ge 60) { "{0}m left" -f [int][Math]::Ceiling($left / 60) } else { "{0}s left" -f [int]$left }
+    if ($Script:FocusPhase -eq "focus") { return "Focus  $txt" }
+    return "Break  $txt"
+}
+
+function Check-Focus {
+    if (-not $Script:FocusPhase -or (Get-Date) -lt $Script:FocusEnd) { return }
+    $auto = [bool]$Script:Cfg.FocusAutoBreak
+    if ($Script:FocusPhase -eq "focus") {
+        Play-Sound "chime"
+        $rest = [int]$Script:Cfg.FocusBreakMinutes
+        if ($rest -le 0) { $Script:FocusPhase = ""; Show-Balloon "Focus session done" "Nice work - keep going or take a breather." ""; return }
+        $Script:FocusPhase = "rest"
+        $Script:FocusLen = $rest * 60
+        $Script:FocusEnd = (Get-Date).AddMinutes($rest)
+        $Script:FocusWork = @{ Id = $Script:TaskId; Name = $Script:TaskName }
+        if ($auto -and $Script:Cfg.BreakTaskId -and $Script:IsRunning -and -not (Test-IsBreak $Script:TaskName)) {
+            Start-Timer $Script:Cfg.BreakTaskId $Script:Cfg.BreakTaskName "" "Break started"
+            Show-Balloon "Focus session done" "Break started for $rest min. I'll tell you when it's over." ""
+        } else {
+            Show-Balloon "Focus session done" "Time for a $rest-minute break." ""
+        }
+    } else {
+        $Script:FocusPhase = ""
+        Play-Sound "chime"
+        $w = $Script:FocusWork
+        if ($auto -and $w -and $w.Id -and $Script:IsRunning -and (Test-IsBreak $Script:TaskName)) {
+            Start-Timer $w.Id $w.Name "" "Back to work"
+            Show-Balloon "Break over" "Back to $($w.Name)." ""
+        } else {
+            Show-Balloon "Break over" "Ready for the next focus session?" "focus"
+        }
+    }
+}
+
+# ===========================================================================
+#  NOTE ON THE RUNNING TIMER, and ADDING MISSED TIME
+# ===========================================================================
+function Show-NoteDialog {
+    if (-not $Script:IsRunning) { return }
+    $d = New-Dialog "Note for this entry" 440 236
+    $f = $d.Form
+    $f.Controls.Add((New-Label "What are you working on in '$($Script:TaskName)'?" 22 56 396 40 $FontUI $UI.Muted))
+    $tb = New-TextBox 22 100 396 ([string]$Script:TimerComment) "Add a note"
+    $f.Controls.Add($tb)
+    $f.Controls.Add((New-Label "Saved on today's entry. The timer keeps running." 22 136 396 20 $FontSmall $UI.Muted))
+    $Script:NoteBox = $tb; $Script:NoteOk = $false
+    $bc = New-FlatButton -Text "Cancel" -X 220 -Y 178 -W 92 -H 36
+    $bs = New-FlatButton -Text "Save note" -X 320 -Y 178 -W 98 -H 36 -Primary
+    $bc.Add_Click({ $this.FindForm().Close() })
+    $bs.Add_Click({ $Script:NoteOk = $true; $this.FindForm().Close() })
+    $f.Controls.Add($bc); $f.Controls.Add($bs); $f.AcceptButton = $bs
+    $f.Add_Shown({ $Script:NoteBox.Focus() | Out-Null; $Script:NoteBox.SelectAll() })
+    [void]$f.ShowDialog()
+    $note = $Script:NoteBox.Text.Trim()
+    $f.Dispose()
+    if ($Script:NoteOk -and $Script:IsRunning) {
+        # Everhour keeps the note with the timer it was started with, so restart
+        # the same task with the new note; the time carries on in the same entry.
+        Start-Timer $Script:TaskId $Script:TaskName $note "Note saved"
+    }
+}
+
+function Add-PickedTime {
+    $pk = $Script:PK
+    if ($pk.Lb.SelectedIndex -lt 0 -or $pk.Lb.SelectedIndex -ge $pk.Items.Count) { $pk.Hint.Text = "Pick a task first."; return }
+    $sel = $pk.Items[$pk.Lb.SelectedIndex]
+    $min = [double]$pk.Minutes
+    if ($min -le 0) { $pk.Hint.Text = "Choose how long."; return }
+    if (-not $Script:UserId) { $pk.Hint.Text = "Still connecting to Everhour - try again in a moment."; Request-Poll -Force; return }
+    if ($pk.Busy) { return }
+    $pk.Busy = $true
+    $pk.Hint.Text = "Adding..."
+    $body = @{ time = [int]($min * 60); date = $pk.Date.ToString("yyyy-MM-dd"); user = $Script:UserId }
+    if ($pk.Note.Text.Trim()) { $body.comment = $pk.Note.Text.Trim() }
+    $Script:AddInfo = "Added $(Format-Short ($min * 60)) to $($sel.Name)"
+    Invoke-Api -Requests @(@{ Name = "add"; Path = "/tasks/$($sel.Id)/time"; Method = "Post"; Body = $body }) -OnDone {
+        param($m)
+        $pk = $Script:PK
+        $r = $m["add"]
+        $Script:RecordsAt = [DateTime]::MinValue; $Script:WeekAt = [DateTime]::MinValue
+        if ($r -and $r.Ok) {
+            Play-Sound "soft"
+            Set-Toast "Time added" 3
+            if ($pk -and -not $pk.Form.IsDisposed) { $pk.Form.Close() }
+            Show-Balloon "Time added" $Script:AddInfo ""
+        } elseif ($pk -and -not $pk.Form.IsDisposed) {
+            $pk.Busy = $false
+            $pk.Hint.ForeColor = $UI.Danger
+            $pk.Hint.Text = "Everhour said no ($($r.Code)). Check the date isn't locked."
+        }
+    }
+}
+
+# ===========================================================================
+#  AUTO-UPDATE  (checks GitHub; installs with one click and restarts)
+# ===========================================================================
+$Script:UpdateVersionUrl = "https://raw.githubusercontent.com/Rahul-Undefined/Everhour-Widget/main/version.json"
+$Script:UpdateZipUrl     = "https://github.com/Rahul-Undefined/Everhour-Widget/archive/refs/heads/main.zip"
+$Script:UpdateAvail = $null
+$Script:UpdCheckedAt = [DateTime]::MinValue
+$Script:StartedAt = Get-Date
+
+$Script:UpdWorker = {
+    param($Kind, $VersionUrl, $ZipUrl)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+    $res = [pscustomobject]@{ Name = $Kind; Ok = $false; Code = 0; Data = $null; Error = "" }
+    try {
+        if ($Kind -eq "updcheck") {
+            $res.Data = Invoke-RestMethod -Uri ($VersionUrl + "?t=" + [DateTime]::UtcNow.Ticks) -TimeoutSec 20 -UseBasicParsing
+        } else {
+            $dir = Join-Path $env:TEMP ("everhour-widget-update-" + [guid]::NewGuid().ToString("N"))
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            $zip = Join-Path $dir "update.zip"
+            Invoke-WebRequest -Uri $ZipUrl -OutFile $zip -UseBasicParsing -TimeoutSec 180
+            $out = Join-Path $dir "files"
+            Expand-Archive -Path $zip -DestinationPath $out -Force
+            $ps1 = Get-ChildItem $out -Recurse -Filter "EverhourWidget.ps1" | Select-Object -First 1
+            if (-not $ps1) { throw "the download has no EverhourWidget.ps1" }
+            $res.Data = $ps1.DirectoryName
+        }
+        $res.Ok = $true
+    } catch { $res.Error = $_.Exception.Message }
+    $res
+}.ToString()
+
+function Start-UpdateJob([string]$kind, [scriptblock]$OnDone) {
+    $ps = [powershell]::Create()
+    $ps.RunspacePool = $Script:Pool
+    [void]$ps.AddScript($Script:UpdWorker).AddArgument($kind).AddArgument($Script:UpdateVersionUrl).AddArgument($Script:UpdateZipUrl)
+    $h = $ps.BeginInvoke()
+    [void]$Script:Jobs.Add([pscustomobject]@{ PS = $ps; Handle = $h; OnDone = $OnDone })
+}
+
+function Check-Update([switch]$Manual) {
+    $Script:UpdCheckedAt = Get-Date
+    if ($Script:UpdBusy) { return }
+    $Script:UpdBusy = $true
+    $Script:UpdManual = [bool]$Manual
+    Start-UpdateJob "updcheck" { param($m) On-UpdateCheck $m["updcheck"] }
+}
+function On-UpdateCheck($r) {
+    $Script:UpdBusy = $false
+    $msg = "Couldn't check for updates right now"
+    if ($r -and $r.Ok -and $r.Data -and $r.Data.version) {
+        $remote = $null; try { $remote = [version]([string]$r.Data.version) } catch { }
+        if ($remote -and $remote -gt [version]$Script:Version) {
+            $Script:UpdateAvail = @{ Version = [string]$r.Data.version; Notes = [string]$r.Data.notes }
+            $msg = "Version $remote is ready to install"
+            if (-not $Script:UpdManual) {
+                Show-Balloon "Widget update: v$remote" "$($r.Data.notes) Click here to install." "update"
+            }
+        } else {
+            $Script:UpdateAvail = $null
+            $msg = "You have the latest version ($($Script:Version))"
+        }
+    }
+    if ($Script:HubOpen -and $Script:Hub.UpdLabel -and -not $Script:Hub.UpdLabel.IsDisposed) { $Script:Hub.UpdLabel.Text = $msg }
+}
+
+function Install-Update {
+    if (Test-Path (Join-Path $ScriptDir ".git")) {
+        Show-Message "Update" "This copy of the widget is a git checkout. Update it with 'git pull' instead, then restart the widget." | Out-Null
+        return
+    }
+    Set-Toast "Downloading update..." 180
+    Start-UpdateJob "updget" { param($m) On-UpdateDownloaded $m["updget"] }
+}
+function On-UpdateDownloaded($r) {
+    if (-not ($r -and $r.Ok)) { Set-Toast "Update failed" 6 -IsError; Write-Log "Update download failed: $($r.Error)"; return }
+    $src = [string]$r.Data
+    $errs = $null; $tok = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $src "EverhourWidget.ps1"), [ref]$tok, [ref]$errs)
+    if ($errs.Count -gt 0) { Set-Toast "Update looks broken - skipped" 6 -IsError; Write-Log "Update skipped: downloaded script has $($errs.Count) parse errors"; return }
+    try {
+        Copy-AppFiles $src $ScriptDir
+        Get-ChildItem $ScriptDir -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
+    } catch { Set-Toast "Update failed" 6 -IsError; Write-Log "Update copy failed: $($_.Exception.Message)"; return }
+    Write-Log "Updated from $($Script:Version) to $($Script:UpdateAvail.Version)"
+    Restart-Widget
+}
+function Restart-Widget {
+    $tmp = Join-Path $env:TEMP "everhour-widget-restart.vbs"
+    (Get-LauncherVbs $ScriptPath) | Set-Content -Path $tmp -Encoding ASCII
+    try { $Script:Mutex.ReleaseMutex() } catch { }
+    Start-Process wscript.exe -ArgumentList "`"$tmp`""
+    $form.Close()
 }
 
 # ===========================================================================
@@ -1692,7 +2005,9 @@ function Step-Pal($pal, $target, [double]$k) {
 }
 
 function Update-ModeAndPalette([switch]$Snap) {
+    $prev = $Script:Mode
     $Script:Mode = Get-Mode
+    if ($Script:Ready -and $Script:Mode -eq "overbreak" -and $prev -and $prev -ne "overbreak") { Play-Sound "alert" }
     $target = Get-ModePalette $Script:Mode
     if (-not $Script:Pal -or $Snap -or -not $Script:Cfg.Animations) {
         $Script:Pal = @{}; foreach ($k in $target.Keys) { $Script:Pal[$k] = $target[$k] }
@@ -1918,8 +2233,10 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
     $dim = A $pal.Muted 55
     switch ($mode) {
         "work" {
-            # one lap per minute, like a seconds hand
+            # one lap per minute, like a seconds hand - or, in a focus
+            # session, the time left draining away
             $lit = ((Get-LiveElapsed) % 60) / 60.0 * $n
+            if ($Script:FocusPhase -eq "focus") { $lit = (Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * ($n - 1) }
             $full = [int][Math]::Floor($lit)
             Fill-DotRun $g (A $pal.Dot 235) $dots 0 ($full - 1) $rd
             Fill-DotRun $g $dim $dots ($full + 1) ($n - 1) $rd
@@ -1930,6 +2247,7 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
         "break" {
             $limit = [Math]::Max(1, [double]$Script:Cfg.BreakLimitMinutes * 60)
             $lit = [int][Math]::Ceiling([Math]::Min(1.0, (Get-BreakTotal) / $limit) * $n)
+            if ($Script:FocusPhase -eq "rest") { $lit = [int][Math]::Ceiling((Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * $n) }
             $breath = 0.75 + 0.25 * [Math]::Sin($at * 2 * [Math]::PI / 4)
             Fill-DotRun $g (A $pal.Dot ([int](235 * $breath))) $dots 0 ($lit - 1) $rd
             Fill-DotRun $g $dim $dots $lit ($n - 1) $rd
@@ -2096,6 +2414,8 @@ function Build-Frame($Pal, [string]$Mode) {
         if ($rows.Count -eq 0) { $y += $hT + (Px 8) } else { $y += $rows.Count * $rowH }
         if ($more -gt 0) { $y += $hS + (Px 4) }
         if ($true) { $y += $hS + (Px 10) }
+        $favL = Get-FavLayout $W $P
+        if ($favL) { $y += $hS + (Px 6) + $favL.H + (Px 10) }
         $y += (Px 6) + $btnH
         $H = [single][Math]::Ceiling($y + $P)
     } else {
@@ -2192,6 +2512,7 @@ function Build-Frame($Pal, [string]$Mode) {
     } elseif ($Script:LastError -eq "OFFLINE") { $chip = "offline" }
     elseif ($Script:LastError -eq "RATE") { $chip = "slowing down" }
     elseif ($Script:LastError -eq "AUTH") { $chip = "key rejected" }
+    elseif ($Script:FocusPhase -and -not $square) { $chip = (Get-FocusLabel).ToLower(); $chipC = $Pal.Accent }
 
     # ---------- texts ----------
     $l1 = ""; $l1C = $Pal.Task; $l1F = $F.Task
@@ -2214,6 +2535,7 @@ function Build-Frame($Pal, [string]$Mode) {
 
     if ($square) {
         $caps = switch ($Mode) { "work" { "TRACKING" } "break" { "ON BREAK" } "overbreak" { "BREAK OVER" } "stopped" { "TIMER OFF" } default { "EVERHOUR" } }
+        if ($Script:FocusPhase) { $caps = (Get-FocusLabel).ToUpper() }
         $cxp = $capsRect[0]
         if ($isBreak) { Draw-Cup $g $Pal.Accent $cxp ($capsRect[1] + (Px 6)) ([single](Px 15)) $at; $cxp += (Px 20) }
         elseif ($Mode -eq "work" -or $Mode -eq "stopped") {
@@ -2355,6 +2677,22 @@ function Build-Frame($Pal, [string]$Mode) {
             Draw-Text $g $wkText $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $hS "Right"
             $ey += $hS + (Px 6)
         }
+        if ($favL) {
+            # favourite tasks as one-click chips
+            $ey += (Px 4)
+            Draw-Text $g "QUICK SWITCH" $F.Caps $Pal.Muted $P $ey ($W - 2 * $P) $hS "Left"
+            $ey += $hS + (Px 6)
+            foreach ($it in $favL.Items) {
+                $cx0 = $P + $it.X; $cy0 = $ey + $it.Y
+                $on = ($Script:IsRunning -and $Script:TaskId -eq $it.Id)
+                $hov = ($Script:Hover -eq "fav:$($it.I)")
+                $bg = if ($on) { A $Pal.Accent 150 } elseif ($hov) { A $Pal.Muted 95 } else { A $Pal.Muted 45 }
+                Fill-Round $g $bg $cx0 $cy0 $it.W $favL.Ch ($favL.Ch / 2)
+                Draw-Text $g $it.Name $F.Small $(if ($on) { $Pal.Time } else { $Pal.Task }) ($cx0 + (Px 8)) $cy0 ($it.W - (Px 16)) $favL.Ch "Center"
+                Add-Hit "fav:$($it.I)" ($cx0 + $M) ($cy0 + $M) $it.W $favL.Ch
+            }
+            $ey += $favL.H + (Px 10)
+        }
         $ey += (Px 6)
 
         $gap = [single](Px 6)
@@ -2379,6 +2717,21 @@ function Build-Frame($Pal, [string]$Mode) {
 
     $g.Dispose()
     return $bmp
+}
+
+function Get-FavLayout([single]$W, [single]$P) {
+    $favs = @(Get-Favs)
+    if ($favs.Count -eq 0) { return $null }
+    $ch = [single](Px 26); $gap = [single](Px 6); $maxW = $W - 2 * $P
+    $x = [single]0; $y = [single]0; $items = @()
+    for ($i = 0; $i -lt $favs.Count; $i++) {
+        $nm = [string]$favs[$i].Name
+        $tw = [single][Math]::Min($maxW * 0.62, (Measure-W $nm $Script:F.Small) + (Px 22))
+        if ($x -gt 0 -and $x + $tw -gt $maxW) { $x = 0; $y += $ch + $gap }
+        $items += [pscustomobject]@{ I = $i; Id = [string]$favs[$i].Id; Name = $nm; X = $x; Y = $y; W = $tw }
+        $x += $tw + $gap
+    }
+    return @{ Items = $items; H = $y + $ch; Ch = $ch }
 }
 
 function Get-Anchor {
@@ -2702,7 +3055,7 @@ function New-NavRow([string]$label, [scriptblock]$Value, [string]$page, [int]$x,
     $p.Add_MouseLeave({ $this.Tag.Hover = $false; $this.Invalidate() })
     $p.Add_Click({
         param($s, $e)
-        if ($s.Tag.Action) { & $s.Tag.Action } elseif ($s.Tag.Page) { Hub-Go $s.Tag.Page 1 -Push }
+        if ($s.Tag.Action) { & $s.Tag.Action $s } elseif ($s.Tag.Page) { Hub-Go $s.Tag.Page 1 -Push }
     })
     return $p
 }
@@ -3143,14 +3496,15 @@ function Build-Page-home($p) {
     foreach ($t in @(@("Always on top of other windows", "AlwaysOnTop"), @("Hide from screen sharing", "HideFromCapture"),
                      @("Auto-hide into the screen edge", "AutoHide"), @("Show seconds", "ShowSeconds"),
                      @("Show today's progress", "ShowTodayTotal"), @("Ask before switching tasks", "ConfirmSwitch"),
-                     @("Start with Windows", "_autostart"))) {
+                     @("Sounds", "Sounds"), @("Start with Windows", "_autostart"))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
     }
-    $y += 8
+    [void](Add-HubCtrl $p (New-NavRow "Favourite tasks" { "{0} pinned" -f @(Get-Favs).Count } "favourites" 24 $y)); $y += 60
     [void](Add-HubCtrl $p (New-Caps "Focus" 24 $y)); $y += 22
     foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
     }
+    [void](Add-HubCtrl $p (New-NavRow "Focus sessions" { "{0} min  |  {1} min break" -f $Script:Cfg.FocusMinutes, $Script:Cfg.FocusBreakMinutes } "focus" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min  |  {1}" -f $Script:Cfg.BreakLimitMinutes, $Script:Cfg.BreakKeywords } "breaks" 24 $y)); $y += 60
 
     [void](Add-HubCtrl $p (New-Caps "Reminders" 24 $y)); $y += 22
@@ -3166,11 +3520,57 @@ function Build-Page-home($p) {
     [void](Add-HubCtrl $p (New-NavRow "Change API token" $null "connect" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Test connection" { Hub-TestConnection } 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-ActionRow "Run the setup guide again" { $Script:Hub.RunSetup = $true; $Script:Hub.Form.Close() } 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 56
-    [void](Add-HubCtrl $p (New-Label "Everhour Widget v$($Script:Version). Changes save automatically." 24 $y 352 20 $FontSmall $UI.Muted))
+    [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 60
+
+    [void](Add-HubCtrl $p (New-Caps "Updates" 24 $y)); $y += 22
+    $upd = if ($Script:UpdateAvail) { "Version $($Script:UpdateAvail.Version) is ready to install" } else { "Version $($Script:Version)" }
+    $H.UpdLabel = New-Label $upd 24 $y 352 22 $FontUI $UI.Text
+    [void](Add-HubCtrl $p $H.UpdLabel); $y += 28
+    if ($Script:UpdateAvail) {
+        [void](Add-HubCtrl $p (New-ActionRow "Install the update now" { $Script:Hub.After = { Install-Update }; $Script:Hub.Form.Close() } 24 $y)); $y += 52
+    }
+    [void](Add-HubCtrl $p (New-ActionRow "Check for updates" { $Script:Hub.UpdLabel.Text = "Checking..."; Check-Update -Manual } 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-HubToggle "Check for updates automatically" "AutoUpdate" 24 $y)); $y += 44
+    [void](Add-HubCtrl $p (New-Label "Changes save automatically." 24 $y 352 20 $FontSmall $UI.Muted))
     $y += 30
     $sp = New-PaintPanel 0 $y 1 1; [void](Add-HubCtrl $p $sp)
     return "Settings"
+}
+
+function Build-Page-focus($p) {
+    $H = $Script:Hub
+    $y = Add-Hero $p "Focus sessions" "Work in focused blocks. The edge lights count down; when time's up you get a chime and a break."
+    [void](Add-HubCtrl $p (New-Caps "Focus for" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "25 min"; V = 25 }, @{ L = "45 min"; V = 45 }, @{ L = "50 min"; V = 50 }) 24 $y 352 { [int]$Script:Cfg.FocusMinutes } { param($v) Set-Cfg "FocusMinutes" ([int][Math]::Max(5, [Math]::Min(180, $v))) } "min")
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Caps "Then a break of" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "None"; V = 0 }, @{ L = "5 min"; V = 5 }, @{ L = "10 min"; V = 10 }, @{ L = "15 min"; V = 15 }) 24 $y 352 { [int]$Script:Cfg.FocusBreakMinutes } { param($v) Set-Cfg "FocusBreakMinutes" ([int][Math]::Min(60, $v)) } "min")
+    $y = Below $ch
+    $bt = if ($Script:Cfg.BreakTaskName) { "Uses '$($Script:Cfg.BreakTaskName)'" } else { "Start your break task once and it's remembered" }
+    [void](Add-HubCtrl $p (New-HubToggle "Switch to my break task and back" "FocusAutoBreak" 24 $y 352 $bt)); $y += 62
+    $b = New-FlatButton -Text "Start a focus session now" -X 24 -Y $y -W 352 -H 42 -Primary
+    $b.Add_Click({ $Script:Hub.After = { Start-Focus 0 }; $Script:Hub.Form.Close() })
+    [void](Add-HubCtrl $p $b)
+    return "Focus"
+}
+
+function Build-Page-favourites($p) {
+    $y = Add-Hero $p "Favourite tasks" "Up to 5. They show as one-click chips on the widget and in the right-click menu. Pin tasks with the star in the task picker."
+    $favs = @(Get-Favs)
+    if ($favs.Count -eq 0) {
+        [void](Add-HubCtrl $p (New-Label "Nothing pinned yet." 24 $y 352 22 $FontUI $UI.Muted)); $y += 34
+    }
+    foreach ($fv in $favs) {
+        $row = New-ActionRow ([string]$fv.Name) { param($row) Toggle-Fav $row.Tag.FavId ""; Hub-Go "favourites" 1 -NoAnim } 24 $y
+        $row.Tag.FavId = [string]$fv.Id
+        $row.Tag.Value = { "Remove" }
+        [void](Add-HubCtrl $p $row); $y += 52
+    }
+    $y += 6
+    $b = New-FlatButton -Text "Open the task picker" -X 24 -Y $y -W 352 -H 40
+    $b.Add_Click({ $Script:Hub.After = { Show-TaskPicker }; $Script:Hub.Form.Close() })
+    [void](Add-HubCtrl $p $b)
+    return "Favourites"
 }
 
 function Build-Page-advanced($p) {
@@ -3322,6 +3722,7 @@ function Show-Hub([string]$Mode = "settings", [string]$Page = "") {
     $haveKey = -not [string]::IsNullOrWhiteSpace((Get-ApiKey))
     if ($setup -and $haveKey) { $Script:Cfg.OnboardingDone = $true; Save-Config }
     if ($H.RunSetup) { return (Show-Hub "setup") }
+    if ($H.After) { & $H.After }
     if ($setup -and $H.Done -and -not $Script:IsRunning -and $Script:Ready) { Show-TaskPicker }
     return $haveKey
 }
@@ -3522,9 +3923,13 @@ function Load-PickerRecent {
         if ($last -and -not $map.ContainsKey($last)) {
             $map[$last] = [pscustomobject]@{ Id = $last; Name = [string]$Script:Cfg.LastTaskName; Last = "9999"; Sec = 0; Sub = "" }
         }
-        $items = @($map.Values | Sort-Object @{ Expression = { $_.Id -eq $last }; Descending = $true }, @{ Expression = "Last"; Descending = $true }, @{ Expression = "Sec"; Descending = $true })
+        foreach ($fv in (Get-Favs)) {
+            if (-not $map.ContainsKey([string]$fv.Id)) { $map[[string]$fv.Id] = [pscustomobject]@{ Id = [string]$fv.Id; Name = [string]$fv.Name; Last = "9999"; Sec = 0; Sub = "" } }
+        }
+        $items = @($map.Values | Sort-Object @{ Expression = { Test-Fav $_.Id }; Descending = $true }, @{ Expression = { $_.Id -eq $last }; Descending = $true }, @{ Expression = "Last"; Descending = $true }, @{ Expression = "Sec"; Descending = $true })
         foreach ($it in $items) {
             $parts = @()
+            if (Test-Fav $it.Id) { $parts += "Favourite" }
             if ($it.Id -eq $last) { $parts += "Last used" }
             if ($it.Last -ne "9999") { $parts += (Format-Day $it.Last) }
             if ($it.Sec -gt 0) { $parts += ((Format-Short $it.Sec) + " in 3 weeks") }
@@ -3567,15 +3972,30 @@ function Run-PickerSearch {
     }
 }
 
-function Show-TaskPicker {
+function Draw-Star($g, $color, [single]$cx, [single]$cy, [single]$r, [bool]$filled) {
+    $pts = New-Object 'System.Drawing.PointF[]' 10
+    for ($i = 0; $i -lt 10; $i++) {
+        $rr = if ($i % 2 -eq 0) { $r } else { $r * 0.45 }
+        $ang = -[Math]::PI / 2 + $i * [Math]::PI / 5
+        $pts[$i] = New-Object System.Drawing.PointF(($cx + $rr * [Math]::Cos($ang)), ($cy + $rr * [Math]::Sin($ang)))
+    }
+    if ($filled) { $b = New-Object System.Drawing.SolidBrush($color); $g.FillPolygon($b, $pts); $b.Dispose() }
+    else { $pen = New-Object System.Drawing.Pen($color, 1.4); $g.DrawPolygon($pen, $pts); $pen.Dispose() }
+}
+
+# Task picker. -AddTime turns it into "add missed time": pick a task, a day
+# and how long, and it's added to Everhour without starting a timer.
+function Show-TaskPicker([switch]$AddTime) {
     if ($Script:PickerOpen) { return }
     $Script:PickerOpen = $true
-    $d = New-Dialog "Start a timer" 500 540
+    $title = if ($AddTime) { "Add missed time" } else { "Start a timer" }
+    $d = New-Dialog $title 500 $(if ($AddTime) { 700 } else { 540 })
     $f = $d.Form
 
     $tb = New-TextBox 22 60 456 "" "Search all tasks..."
     $f.Controls.Add($tb)
 
+    $listH = if ($AddTime) { 210 } else { 290 }
     $lb = New-Object System.Windows.Forms.ListBox
     $lb.DrawMode = "OwnerDrawFixed"
     $lb.ItemHeight = Px 42
@@ -3584,13 +4004,14 @@ function Show-TaskPicker {
     $lb.BorderStyle = "None"
     $lb.BackColor = $UI.Card; $lb.ForeColor = $UI.Text
     $lb.Location = New-Object System.Drawing.Point((Px 22), (Px 100))
-    $lb.Size = New-Object System.Drawing.Size((Px 456), (Px 290))
+    $lb.Size = New-Object System.Drawing.Size((Px 456), (Px $listH))
     $f.Controls.Add($lb)
     $lb.Add_DrawItem({
         param($s, $e)
         if ($e.Index -lt 0 -or $e.Index -ge $Script:PK.Items.Count) { return }
         $it = $Script:PK.Items[$e.Index]
         $g = $e.Graphics
+        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         $sel = ($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -ne 0
         $bg = if ($sel) { $UI.Sel } else { $UI.Card }
         $br = New-Object System.Drawing.SolidBrush($bg); $g.FillRectangle($br, $e.Bounds); $br.Dispose()
@@ -3598,9 +4019,12 @@ function Show-TaskPicker {
             $ab = New-Object System.Drawing.SolidBrush($UI.Accent)
             $g.FillRectangle($ab, $e.Bounds.X, ($e.Bounds.Y + (Px 8)), (Px 3), ($e.Bounds.Height - (Px 16))); $ab.Dispose()
         }
+        # star: pin as a favourite
+        $fav = Test-Fav $it.Id
+        Draw-Star $g $(if ($fav) { [System.Drawing.ColorTranslator]::FromHtml("#FBBF24") } else { $UI.Muted }) ($e.Bounds.Right - (Px 20)) ($e.Bounds.Y + $e.Bounds.Height / 2) ([single](Px 8)) $fav
         $flags = [System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor
                  [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
-        $x = $e.Bounds.X + (Px 14); $w = $e.Bounds.Width - (Px 24)
+        $x = $e.Bounds.X + (Px 14); $w = $e.Bounds.Width - (Px 52)
         if ($it.Sub) {
             $r1 = New-Object System.Drawing.Rectangle($x, ($e.Bounds.Y + (Px 3)), $w, (Px 20))
             $r2 = New-Object System.Drawing.Rectangle($x, ($e.Bounds.Y + (Px 21)), $w, (Px 18))
@@ -3611,23 +4035,56 @@ function Show-TaskPicker {
             [System.Windows.Forms.TextRenderer]::DrawText($g, $it.Name, $FontUI, $r1, $UI.Text, $flags)
         }
     })
+    $lb.Add_MouseClick({
+        param($s, $e)
+        if ($e.X -lt $s.ClientSize.Width - (Px 40)) { return }
+        $i = $s.IndexFromPoint($e.Location)
+        if ($i -lt 0 -or $i -ge $Script:PK.Items.Count) { return }
+        $it = $Script:PK.Items[$i]
+        Toggle-Fav $it.Id $it.Name
+        $s.Invalidate()
+    })
 
-    $note = New-TextBox 22 402 456 "" "Note for this entry (optional)"
+    $y = 100 + $listH + 12
+    $Script:PK = @{ Form = $f; Tb = $tb; Lb = $lb; Items = (New-Object System.Collections.ArrayList); Recent = @(); Query = ""
+                    AddTime = [bool]$AddTime; Date = (Get-Date).Date; Minutes = 30; Busy = $false }
+    if ($AddTime) {
+        $f.Controls.Add((New-Caps "When" 22 $y)); $y += 22
+        $dc = New-Chips @(@{ L = "Today"; V = 0 }, @{ L = "Yesterday"; V = 1 }) 22 $y 200 {
+            [int]((Get-Date).Date - $Script:PK.Date).TotalDays } { param($v) $Script:PK.Date = (Get-Date).Date.AddDays(-[int]$v); $Script:PK.Dtp.Value = $Script:PK.Date }
+        $f.Controls.Add($dc)
+        $dtp = New-Object System.Windows.Forms.DateTimePicker
+        $dtp.Format = "Custom"; $dtp.CustomFormat = "ddd d MMM yyyy"; $dtp.Font = $FontUI
+        $dtp.MaxDate = (Get-Date).Date
+        $dtp.Value = (Get-Date).Date
+        $dtp.Location = New-Object System.Drawing.Point((Px 250), (Px ($y + 4)))
+        $dtp.Width = Px 228
+        $dtp.Add_ValueChanged({ $Script:PK.Date = $this.Value.Date; $Script:PK.DateChips.Invalidate() })
+        $f.Controls.Add($dtp)
+        $Script:PK.Dtp = $dtp; $Script:PK.DateChips = $dc
+        $y = Below $dc 10
+        $f.Controls.Add((New-Caps "How long" 22 $y)); $y += 22
+        $hc = New-Chips @(@{ L = "15 min"; V = 15 }, @{ L = "30 min"; V = 30 }, @{ L = "45 min"; V = 45 }, @{ L = "1 h"; V = 60 }, @{ L = "2 h"; V = 120 }) 22 $y 456 {
+            [double]$Script:PK.Minutes } { param($v) $Script:PK.Minutes = [double]$v } "min"
+        $f.Controls.Add($hc)
+        $y = Below $hc 10
+    }
+    $note = New-TextBox 22 $y 456 "" $(if ($AddTime) { "What was it? (optional)" } else { "Note for this entry (optional)" })
     $f.Controls.Add($note)
-
-    $hint = New-Label "Loading recent tasks..." 22 446 250 40 $FontSmall $UI.Muted
-    if ($Script:IsRunning) { $hint.Text = "Now tracking: $($Script:TaskName)" }
+    $y += 42
+    $hint = New-Label "Loading recent tasks..." 22 $y 250 40 $FontSmall $UI.Muted
+    if ($Script:IsRunning -and -not $AddTime) { $hint.Text = "Now tracking: $($Script:TaskName)" }
     $f.Controls.Add($hint)
-
-    $btnCancel = New-FlatButton -Text "Cancel" -X 280 -Y 482 -W 92 -H 36
-    $btnGo = New-FlatButton -Text "Start" -X 380 -Y 482 -W 98 -H 36 -Primary
+    $btnCancel = New-FlatButton -Text "Cancel" -X 280 -Y ($y + 2) -W 92 -H 36
+    $btnGo = New-FlatButton -Text $(if ($AddTime) { "Add time" } else { "Start" }) -X 380 -Y ($y + 2) -W 98 -H 36 -Primary
     $f.Controls.Add($btnCancel); $f.Controls.Add($btnGo)
+    $f.Height = [Math]::Min($f.Height, (Px ($y + 58)))
+    $Script:PK.Note = $note; $Script:PK.Hint = $hint
 
     $deb = New-Object System.Windows.Forms.Timer
     $deb.Interval = 350
     $deb.Add_Tick({ $this.Stop(); Run-PickerSearch })
-
-    $Script:PK = @{ Form = $f; Tb = $tb; Lb = $lb; Note = $note; Hint = $hint; Items = (New-Object System.Collections.ArrayList); Recent = @(); Query = ""; Deb = $deb }
+    $Script:PK.Deb = $deb
 
     $tb.Add_TextChanged({ $Script:PK.Deb.Stop(); $Script:PK.Deb.Start() })
     $tb.Add_KeyDown({
@@ -3641,7 +4098,7 @@ function Show-TaskPicker {
             $e.SuppressKeyPress = $true; Start-PickedTask
         }
     })
-    $lb.Add_DoubleClick({ Start-PickedTask })
+    $lb.Add_DoubleClick({ param($s, $e) if ($s.PointToClient([System.Windows.Forms.Cursor]::Position).X -lt $s.ClientSize.Width - (Px 40)) { Start-PickedTask } })
     $lb.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Start-PickedTask } })
     $note.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Start-PickedTask } })
     $btnGo.Add_Click({ Start-PickedTask })
@@ -3658,6 +4115,7 @@ function Show-TaskPicker {
 
 function Start-PickedTask {
     $pk = $Script:PK
+    if ($pk.AddTime) { Add-PickedTime; return }
     if ($pk.Lb.SelectedIndex -lt 0 -or $pk.Lb.SelectedIndex -ge $pk.Items.Count) { $pk.Hint.Text = "Pick a task first."; return }
     $sel = $pk.Items[$pk.Lb.SelectedIndex]
     if ($Script:IsRunning -and $sel.Id -eq $Script:TaskId) { $pk.Hint.Text = "That task is already running."; return }
@@ -3668,7 +4126,6 @@ function Start-PickedTask {
     Start-Timer $sel.Id $sel.Name $pk.Note.Text
     $pk.Form.Close()
 }
-
 # ===========================================================================
 #  SETUP GUIDE  (first run, and again from Settings / the menu)
 #  Animated walkthrough of where the API token lives in Everhour, then a
@@ -3853,13 +4310,13 @@ function Draw-ScenePaste($g, [double]$t) {
 # A widget frame drawn with sample data, for the guide.
 $Script:DemoVars = @("IsRunning", "TaskId", "TaskName", "BaseDuration", "TimerToday", "LastPollAt", "RecordsLoaded", "WeekLoaded",
                      "TodayByTask", "TodayRecordsTotal", "WeekRecordsTotal", "FirstPollDone", "LastError", "IsExpanded", "Hover",
-                     "Toast", "Hits", "StoppedSince")
+                     "Toast", "Hits", "StoppedSince", "FocusPhase")
 $Script:DemoPal = $null
 function Build-DemoFrame([string]$mode, [double]$t) {
     $saved = @{}
     foreach ($n in $Script:DemoVars) { $saved[$n] = (Get-Variable -Scope Script -Name $n).Value }
     try {
-        $Script:FirstPollDone = $true; $Script:LastError = ""; $Script:IsExpanded = $false; $Script:Hover = ""; $Script:Toast = ""
+        $Script:FirstPollDone = $true; $Script:LastError = ""; $Script:IsExpanded = $false; $Script:Hover = ""; $Script:Toast = ""; $Script:FocusPhase = ""
         $Script:RecordsLoaded = $true; $Script:LastPollAt = Get-Date
         $Script:TodayByTask = @{ "d1" = @{ Name = "Website redesign"; Sec = 7800 }; "d2" = @{ Name = "Break Time"; Sec = 1200 } }
         $Script:TodayRecordsTotal = 9000
@@ -3935,6 +4392,12 @@ $menu.ForeColor = $UI.Text
 $miStart    = $menu.Items.Add("Start a timer...")
 $miResume   = $menu.Items.Add("Resume last task")
 $miStop     = $menu.Items.Add("Stop timer")
+$miFavs     = New-Object System.Windows.Forms.ToolStripMenuItem("Favourites")
+$miFocus    = New-Object System.Windows.Forms.ToolStripMenuItem("Focus")
+[void]$menu.Items.Add($miFavs); [void]$menu.Items.Add($miFocus)
+$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
+$miNote     = $menu.Items.Add("Edit note...")
+$miAddTime  = $menu.Items.Add("Add missed time...")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miRefresh  = $menu.Items.Add("Refresh now")
 $miOpen     = $menu.Items.Add("Open Everhour")
@@ -3942,9 +4405,23 @@ $miShape    = $menu.Items.Add("Shape")
 function Get-NextShape { switch ([string]$Script:Cfg.Shape) { "Large" { return "Square" } "Square" { return "Wide" } default { return "Large" } } }
 $miSettings = $menu.Items.Add("Settings...")
 $miGuide    = $menu.Items.Add("Setup guide...")
+$miUpdate   = $menu.Items.Add("Install update")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miExit     = $menu.Items.Add("Exit")
 foreach ($mi in $menu.Items) { $mi.Padding = New-Object System.Windows.Forms.Padding(4, 3, 4, 3) }
+foreach ($sub in @($miFavs, $miFocus)) {
+    $sub.DropDown.BackColor = $UI.Card; $sub.DropDown.ForeColor = $UI.Text
+    if ($menu.Renderer) { $sub.DropDown.Renderer = $menu.Renderer }
+    $sub.DropDown.ShowImageMargin = $false
+}
+
+function New-SubItem($parent, [string]$text, [scriptblock]$onClick, $tag = $null, [bool]$enabled = $true) {
+    $it = New-Object System.Windows.Forms.ToolStripMenuItem($text)
+    $it.Tag = $tag; $it.Enabled = $enabled
+    $it.Padding = New-Object System.Windows.Forms.Padding(4, 3, 4, 3)
+    if ($onClick) { $it.Add_Click($onClick) }
+    [void]$parent.DropDownItems.Add($it)
+}
 
 $menu.Add_Opening({
     $miStop.Enabled = $Script:IsRunning
@@ -3954,10 +4431,38 @@ $menu.Add_Opening({
     $miResume.Text = "Resume  $last"
     $miStart.Text = if ($Script:IsRunning) { "Switch task..." } else { "Start a timer..." }
     $miShape.Text = "Shape: switch to " + (Get-NextShape).ToLower()
+    $miNote.Enabled = $Script:IsRunning
+    $miUpdate.Visible = [bool]$Script:UpdateAvail
+    if ($Script:UpdateAvail) { $miUpdate.Text = "Install update (v$($Script:UpdateAvail.Version))" }
+
+    $miFavs.DropDownItems.Clear()
+    $favs = @(Get-Favs)
+    for ($i = 0; $i -lt $favs.Count; $i++) {
+        $nm = [string]$favs[$i].Name; if ($nm.Length -gt 40) { $nm = $nm.Substring(0, 39) + "..." }
+        if ($Script:IsRunning -and $Script:TaskId -eq $favs[$i].Id) { $nm = "$nm   (running)" }
+        New-SubItem $miFavs $nm { Start-Fav ([int]$this.Tag) } $i
+    }
+    if ($favs.Count -eq 0) { New-SubItem $miFavs "Pin tasks with the star in the task picker" $null $null $false }
+    if ($Script:IsRunning) {
+        $pinned = Test-Fav $Script:TaskId
+        New-SubItem $miFavs $(if ($pinned) { "Unpin the running task" } else { "Pin the running task" }) { Toggle-Fav $Script:TaskId $Script:TaskName }
+    }
+
+    $miFocus.DropDownItems.Clear()
+    if ($Script:FocusPhase) {
+        New-SubItem $miFocus (Get-FocusLabel) $null $null $false
+        New-SubItem $miFocus "End focus session" { Stop-Focus }
+    } else {
+        $fm = [int]$Script:Cfg.FocusMinutes
+        foreach ($m in @($fm, 50) | Select-Object -Unique) { New-SubItem $miFocus "Focus for $m min" { Start-Focus ([int]$this.Tag) } $m }
+        New-SubItem $miFocus "Focus settings..." { Show-Hub "settings" "focus" | Out-Null }
+    }
 })
 $miStart.Add_Click({ Show-TaskPicker })
 $miResume.Add_Click({ Resume-LastTask })
 $miStop.Add_Click({ Stop-Timer })
+$miNote.Add_Click({ Show-NoteDialog })
+$miAddTime.Add_Click({ Show-TaskPicker -AddTime })
 $miRefresh.Add_Click({ $Script:RecordsAt = [DateTime]::MinValue; $Script:WeekAt = [DateTime]::MinValue; Request-Poll -Force })
 $miOpen.Add_Click({ Start-Process "https://app.everhour.com/" })
 $miShape.Add_Click({
@@ -3966,6 +4471,7 @@ $miShape.Add_Click({
 })
 $miSettings.Add_Click({ Show-Settings })
 $miGuide.Add_Click({ Show-Hub "setup" | Out-Null })
+$miUpdate.Add_Click({ Install-Update })
 $miExit.Add_Click({ $form.Close() })
 $form.ContextMenuStrip = $menu
 
@@ -4025,8 +4531,9 @@ $form.Add_MouseUp({
         return
     }
     if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
-    switch (Get-HitAt $e.Location) {
+    switch -Wildcard (Get-HitAt $e.Location) {
         "toggle"     { Toggle-Timer }
+        "fav:*"      { Start-Fav ([int]((Get-HitAt $e.Location).Substring(4))) }
         "b_start"    { Show-TaskPicker }
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
@@ -4062,6 +4569,8 @@ $notify.Add_BalloonTipClicked({
     switch ($Script:BalloonAction) {
         "picker" { Show-TaskPicker }
         "key"    { Change-ApiKey | Out-Null }
+        "update" { Install-Update }
+        "focus"  { Start-Focus 0 }
     }
 })
 $notify.Add_BalloonTipClosed({ $notify.Visible = $false })
@@ -4085,6 +4594,7 @@ function Check-IdleNudge {
         if ($idleMin -lt [int]$Script:Cfg.IdleNudgeMinutes) { return }
         if (($now - $Script:NudgedAt).TotalMinutes -lt [int]$Script:Cfg.IdleNudgeMinutes) { return }
         $Script:NudgedAt = $now
+        Play-Sound "soft"
         Show-Balloon "No timer running" "You haven't tracked time for $([int]$idleMin) minutes. Click here to start one." "picker"
     } catch { }
 }
@@ -4131,6 +4641,10 @@ $uiTimer.Add_Tick({
         elseif (($now - $Script:LastInteract).TotalSeconds -ge 4) { Start-AutoHide }
     }
     if (-not $Script:Cfg.AutoHide -and $Script:HideTarget -eq 1) { Show-FromHide }
+
+    Check-Focus
+    # look for a new version 30 s after start, then every 6 hours
+    if ($Script:Cfg.AutoUpdate -and ($now - $Script:StartedAt).TotalSeconds -gt 30 -and ($now - $Script:UpdCheckedAt).TotalHours -ge 6) { Check-Update }
 
     if ($notify.Visible -and $now -gt $Script:NotifyHideAt) { $notify.Visible = $false }
     if (-not $Script:Cfg.Animations) {
@@ -4197,6 +4711,7 @@ if ($RenderPreview) {
     $Script:TodayRecordsTotal = 8100
     $Script:WeekRecordsTotal = 19 * 3600 + 1500
     $Script:Cfg.LastTaskId = "ev:1"; $Script:Cfg.LastTaskName = "Q4 dashboard redesign"
+    $Script:Cfg.Favorites = @([pscustomobject]@{ Id = "ev:1"; Name = "Q4 dashboard redesign" }, [pscustomobject]@{ Id = "ev:2"; Name = "Client sync call" }, [pscustomobject]@{ Id = "ev:3"; Name = "Break Time" })
     $Script:Cfg.Animations = $true
     $Script:FixedAnimT = 2.3
     function Save-Preview([string]$name) {
@@ -4287,10 +4802,27 @@ if ($RenderPreview) {
     [void]$Script:CapQueue.Dequeue()      # setup starts on its first page by itself
     $ct.Start()
     Show-Hub "setup" | Out-Null
-    foreach ($pg in @("_scroll", "advanced", "workday")) { $Script:CapQueue.Enqueue("settings:$pg") }
+    foreach ($pg in @("_scroll", "advanced", "workday", "focus", "favourites")) { $Script:CapQueue.Enqueue("settings:$pg") }
     $ct.Start()
     Show-Hub "settings" | Out-Null
     $ct.Stop()
+    # focus session look
+    $Script:Cfg.Shape = "Large"; Apply-Theme; Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120
+    $Script:FocusPhase = "focus"; $Script:FocusLen = 1500; $Script:FocusEnd = (Get-Date).AddMinutes(17)
+    Save-Preview "large-focus"
+    $Script:FocusPhase = ""; $Script:IsRunning = $false; $Script:TaskId = ""
+    # add-missed-time picker
+    $pt = New-Object System.Windows.Forms.Timer
+    $pt.Interval = 4500
+    $pt.Add_Tick({
+        $this.Stop()
+        $fm = $Script:PK.Form
+        $cb = New-Object System.Drawing.Bitmap($fm.Width, $fm.Height)
+        $fm.DrawToBitmap($cb, (New-Object System.Drawing.Rectangle(0, 0, $fm.Width, $fm.Height)))
+        $cb.Save((Join-Path $RenderPreview "picker-addtime.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+        $cb.Dispose(); $fm.Close()
+    })
+    $pt.Start(); Show-TaskPicker -AddTime
     Write-Host "Preview images written to $RenderPreview"
     exit
 }
