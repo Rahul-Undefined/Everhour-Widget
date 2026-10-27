@@ -47,28 +47,35 @@ USING IT
 --------
   Round button       start / stop. When nothing is running it resumes the
                      last task you tracked (hover it to see which one).
-  Click              expand: today's time task by task, this week's total,
-                     and Start / Stop / Settings buttons.
+  Click              Wide / Square: open today's list (Large always shows it)
   Click and drag     move it anywhere, on any monitor - it remembers the spot
+                     and never goes off screen
   Right-click        menu: start, resume, stop, refresh, open Everhour,
-                     switch wide/square, settings, setup guide, exit
+                     change shape, settings, setup guide, exit
   Ctrl+Alt+E         start / stop from anywhere (change it in Settings)
+
+
+SHAPES AND AUTO-HIDE
+--------------------
+  Large (default)   phone-widget style, today's tasks always visible
+  Square            compact; click to open the list
+  Wide              slim bar; click to open the list
+  Auto-hide         slides into the screen edge when you're not using it;
+                    a dot strip keeps showing the status - hover to bring
+                    it back
 
 
 MAKING IT YOURS
 ---------------
-Right-click -> Settings:
-  - Shape: Wide or Square (phone-widget style)
-  - Themes: Graphite, Ocean, Midnight, Forest, Sunset, Light - or any colours
-  - Fonts: Inter (iPhone style), Doto (Nothing dot-matrix), Space Grotesk,
-    Geist, Poppins and more; the timer can use its own font
-  - Animations, edge lights, red-when-stopped, break allowance and words
-  - Hide from screen sharing and screenshots (on by default): people in
-    your Teams / Zoom / Meet calls won't see the widget
-  - Daily target, refresh speed, shortcut, reminders, work hours and days
-
-Changes show on the widget as you make them. Save keeps them, Cancel puts
-everything back.
+Right-click -> Settings. Everything saves the moment you change it:
+  - Look: theme, shape, font (Inter = iPhone style, Doto = Nothing dots...),
+    text size S / M / L, background glass or solid
+  - Widget: always on top, hide from screen sharing, auto-hide, seconds,
+    progress bar, ask before switching, start with Windows
+  - Focus: animations, edge lights, red when stopped, breaks
+  - Work hours (scroll wheels), work days and reminders
+  - Advanced: daily target, refresh speed, auto-collapse, keyboard shortcut
+  - Account: change token, test connection, setup guide, log folder
 
 
 CHECKING IT WILL START WHEN YOU POWER ON

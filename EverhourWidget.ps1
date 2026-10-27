@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v5
+    EverhourWidget.ps1  -  v6
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "5.0"
+$Script:Version = "6.0"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -446,7 +446,7 @@ if ($Setup) {
 #  CONFIG
 # ===========================================================================
 $Script:Defaults = [ordered]@{
-    ConfigVersion       = 5
+    ConfigVersion       = 6
     ApiKey              = ""      # legacy plain-text key; migrated to ApiKeyProtected
     ApiKeyProtected     = ""
     OnboardingDone      = $false
@@ -462,7 +462,9 @@ $Script:Defaults = [ordered]@{
     TimerFontFamily     = ""      # "" = same as FontFamily
     TimeFontSize        = 18
     TaskFontSize        = 9
-    Shape               = "Wide"  # Wide or Square
+    Shape               = "Large" # Large, Square or Wide
+    TextSize            = "M"     # S, M or L
+    AutoHide            = $false  # slide into the screen edge when not in use
     Width               = 300
     SquareSize          = 180
     CornerRadius        = 14
@@ -505,7 +507,7 @@ $Script:Themes = [ordered]@{
 function Read-Config {
     $cfg = [ordered]@{}
     foreach ($k in $Script:Defaults.Keys) { $cfg[$k] = $Script:Defaults[$k] }
-    $ver = 5
+    $ver = 6
     if (Test-Path $ConfigPath) {
         try {
             $saved = Get-Content $ConfigPath -Raw | ConvertFrom-Json
@@ -529,7 +531,14 @@ function Read-Config {
         if ([string]$cfg.FontFamily -in @("Segoe UI", "Arial", "Segoe UI Semibold", "Calibri", "Tahoma", "Verdana")) { $cfg.FontFamily = "Inter" }
         $cfg.OnboardingDone = $false     # show the new setup guide once
     }
-    $cfg.ConfigVersion = 5
+    if ($ver -lt 6) {
+        # v6: the always-open Large shape is the default; sizes become S / M / L
+        if ([string]$cfg.Shape -eq "Wide") { $cfg.Shape = "Large" }
+        $tf = [int]$cfg.TimeFontSize
+        $cfg.TextSize = if ($tf -le 16) { "S" } elseif ($tf -le 19) { "M" } else { "L" }
+        $cfg.OnboardingDone = $false     # show the new setup flow once
+    }
+    $cfg.ConfigVersion = 6
     return $cfg
 }
 
@@ -548,7 +557,8 @@ function Normalize-Config {
     try { $c.IdleNudgeMinutes    = [int](Limit $c.IdleNudgeMinutes 5 240) }      catch { $c.IdleNudgeMinutes = 15 }
     try { $c.DailyTargetHours    = [double](Limit $c.DailyTargetHours 0 24) }    catch { $c.DailyTargetHours = 8 }
     try { $c.BreakLimitMinutes   = [int](Limit $c.BreakLimitMinutes 0 600) }     catch { $c.BreakLimitMinutes = 60 }
-    if ($c.Shape -ne "Square") { $c.Shape = "Wide" }
+    if ($c.Shape -notin @("Wide", "Square", "Large")) { $c.Shape = "Large" }
+    if ($c.TextSize -notin @("S", "M", "L")) { $c.TextSize = "M" }
     if (-not (Parse-HHmm $c.WorkStart)) { $c.WorkStart = "09:30" }
     if (-not (Parse-HHmm $c.WorkEnd))   { $c.WorkEnd   = "18:30" }
     if ($null -eq $c.WorkDays) { $c.WorkDays = "Mon,Tue,Wed,Thu,Fri" }
@@ -1515,79 +1525,8 @@ function Show-Message([string]$Title, [string]$Text, [string]$OkText = "OK", [st
     return $Script:MsgResult
 }
 
-# ===========================================================================
-#  API KEY DIALOG  (for changing the key later; first run uses the guide)
-# ===========================================================================
-function Show-KeyDialog {
-    $d = New-Dialog "Change API key" 440 318
-    $f = $d.Form
-    $f.Controls.Add((New-Label "Paste your personal Everhour API token." 22 56 396 20 $FontUI $UI.Text))
-    $f.Controls.Add((New-Label "Everhour: your name (bottom-left) > My Profile > Application Access" 22 78 396 20 $FontSmall $UI.Muted))
-
-    $tb = New-TextBox 22 110 396 "" "API token"
-    $tb.UseSystemPasswordChar = $true
-    $f.Controls.Add($tb)
-
-    $show = New-Object System.Windows.Forms.CheckBox
-    $show.Text = "Show token"; $show.Font = $FontSmall; $show.ForeColor = $UI.Muted
-    $show.Location = New-Object System.Drawing.Point((Px 22), (Px 144))
-    $show.Size = New-Object System.Drawing.Size((Px 120), (Px 22))
-    $show.Add_CheckedChanged({ $Script:KD.Tb.UseSystemPasswordChar = -not $this.Checked })
-    $f.Controls.Add($show)
-
-    $st = New-Label "" 22 172 396 40 $FontSmall $UI.Muted
-    $f.Controls.Add($st)
-    $f.Controls.Add((New-Label "Stored encrypted on this PC. Only ever sent to api.everhour.com." 22 216 396 20 $FontSmall $UI.Muted))
-
-    $btnCancel = New-FlatButton -Text "Cancel" -X 220 -Y 262 -W 92 -H 34
-    $btnGo = New-FlatButton -Text "Connect" -X 320 -Y 262 -W 98 -H 34 -Primary
-    $f.Controls.Add($btnCancel); $f.Controls.Add($btnGo)
-    $f.AcceptButton = $btnGo
-
-    $Script:KD = @{ Result = $null; Tb = $tb; St = $st; Form = $f; Busy = $false }
-    $btnCancel.Add_Click({ $Script:KD.Form.Close() })
-    $btnGo.Add_Click({
-        $kd = $Script:KD
-        $k = $kd.Tb.Text.Trim()
-        if (-not $k) { $kd.St.ForeColor = $UI.Danger; $kd.St.Text = "Paste your token first."; return }
-        if ($kd.Busy) { return }
-        $kd.Busy = $true
-        $kd.St.ForeColor = $UI.Muted; $kd.St.Text = "Checking with Everhour..."
-        Invoke-Api -Key $k -Requests @(@{ Name = "me"; Path = "/users/me" }) -OnDone {
-            param($m)
-            $kd = $Script:KD
-            $kd.Busy = $false
-            if ($kd.Form.IsDisposed) { return }
-            $r = $m["me"]
-            if ($r -and $r.Ok -and $r.Data) {
-                $Script:UserId = $r.Data.id
-                $Script:UserName = [string]$r.Data.name
-                $kd.Result = $kd.Tb.Text.Trim()
-                $kd.Form.Close()
-            } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
-                $kd.St.ForeColor = $UI.Danger
-                $kd.St.Text = "Everhour rejected this token. Check you copied all of it."
-            } else {
-                # Can't verify while offline - accept it; the widget will say if it's wrong.
-                $kd.Result = $kd.Tb.Text.Trim()
-                $kd.Form.Close()
-            }
-        }
-    })
-    $f.Add_Shown({ $Script:KD.Tb.Focus() | Out-Null })
-    [void]$f.ShowDialog()
-    $f.Dispose()
-    return $Script:KD.Result
-}
-
 function Change-ApiKey {
-    $k = Show-KeyDialog
-    if ($k) {
-        Set-ApiKey $k
-        After-KeyChanged
-        return $true
-    }
-    return $false
+    return (Show-Hub "settings" "connect")
 }
 
 function After-KeyChanged {
@@ -1759,8 +1698,12 @@ function Update-ModeAndPalette([switch]$Snap) {
         $Script:Pal = @{}; foreach ($k in $target.Keys) { $Script:Pal[$k] = $target[$k] }
         $Script:PalSettled = $true
     } else {
-        $Script:PalSettled = Step-Pal $Script:Pal $target 0.14
+        # time-based easing: the same glide whatever the frame rate
+        $now = $Script:Clock.Elapsed.TotalSeconds
+        $dt = [Math]::Min(0.2, [Math]::Max(0.001, $now - $Script:PalAt))
+        $Script:PalSettled = Step-Pal $Script:Pal $target (1 - [Math]::Exp(-$dt / 0.22))
     }
+    $Script:PalAt = $Script:Clock.Elapsed.TotalSeconds
 }
 
 function Get-AnimTime {
@@ -1782,14 +1725,17 @@ function Apply-Theme {
     foreach ($old in $Script:F.Values) { try { $old.Dispose() } catch { } }
     $fam = [string]$c.FontFamily
     $tfam = if ([string]::IsNullOrWhiteSpace($c.TimerFontFamily)) { $fam } else { [string]$c.TimerFontFamily }
+    $sz = $Script:TextSizes[[string]$c.TextSize]
+    if (-not $sz) { $sz = $Script:TextSizes["M"] }
+    $tm = [double]$sz.Time; $tk = [double]$sz.Task
     $Script:F = @{
-        Task      = New-PxFont $fam ([double]$c.TaskFontSize)
-        TaskBold  = New-PxFont $fam ([double]$c.TaskFontSize) ([System.Drawing.FontStyle]::Bold)
-        Time      = New-PxFont $tfam ([double]$c.TimeFontSize) ([System.Drawing.FontStyle]::Bold)
-        TimeBig   = New-PxFont $tfam ([double]$c.TimeFontSize * 1.35) ([System.Drawing.FontStyle]::Bold)
-        Small     = New-PxFont $fam ([Math]::Max(7, [double]$c.TaskFontSize - 1))
-        SmallBold = New-PxFont $fam ([Math]::Max(7, [double]$c.TaskFontSize - 1.5)) ([System.Drawing.FontStyle]::Bold)
-        Caps      = New-PxFont $fam ([Math]::Max(6.5, [double]$c.TaskFontSize - 2)) ([System.Drawing.FontStyle]::Bold)
+        Task      = New-PxFont $fam $tk
+        TaskBold  = New-PxFont $fam $tk ([System.Drawing.FontStyle]::Bold)
+        Time      = New-PxFont $tfam $tm ([System.Drawing.FontStyle]::Bold)
+        TimeBig   = New-PxFont $tfam ($tm * 1.35) ([System.Drawing.FontStyle]::Bold)
+        Small     = New-PxFont $fam ([Math]::Max(7, $tk - 1))
+        SmallBold = New-PxFont $fam ([Math]::Max(7, $tk - 1.5)) ([System.Drawing.FontStyle]::Bold)
+        Caps      = New-PxFont $fam ([Math]::Max(6.5, $tk - 2)) ([System.Drawing.FontStyle]::Bold)
     }
     $form.TopMost = [bool]$c.AlwaysOnTop
     if (-not $Script:Layered) {
@@ -1804,8 +1750,13 @@ function Apply-Theme {
 
 function Get-FrameMargin { if ($Script:Layered) { return (Px 12) } else { return 0 } }
 
+function Get-ShapeWidth {
+    switch ([string]$Script:Cfg.Shape) { "Square" { return (Px $Script:Cfg.SquareSize) } "Large" { return (Px 272) } default { return (Px $Script:Cfg.Width) } }
+}
+
 function Get-CollapsedFrameHeight {
     if ($Script:Cfg.Shape -eq "Square") { return (Px $Script:Cfg.SquareSize) + 2 * (Get-FrameMargin) }
+    if ($Script:Cfg.Shape -eq "Large") { return (Px 400) + 2 * (Get-FrameMargin) }
     $P = Px 16
     $hT = $Script:F.Task.GetHeight(); $hB = $Script:F.Time.GetHeight()
     $topH = [Math]::Max((Px 38), $hT + $hB - (Px 1))
@@ -1819,7 +1770,93 @@ function Render {
 }
 
 function Render-Core {
-    Push-Frame (Build-Frame $Script:Pal $Script:Mode)
+    if ($Script:HideP -ge 0.999) { Push-Peek (Build-Peek $Script:Pal $Script:Mode); return }
+    $slide = 0.0
+    if ($Script:HideP -gt 0.001) { $slide = Ease $Script:HideP }
+    Push-Frame (Build-Frame $Script:Pal $Script:Mode) $slide
+}
+
+# ---------------------------------------------------------------------------
+#  AUTO-HIDE: the widget slides into the nearest side edge; a slim pill of
+#  dots stays visible and keeps showing the status. Hover it to bring the
+#  widget back.
+# ---------------------------------------------------------------------------
+$Script:HideP = 0.0
+$Script:HideTarget = 0
+$Script:HideSide = "right"
+
+function Get-AnchorScreen {
+    $an = Get-Anchor
+    return [System.Windows.Forms.Screen]::FromPoint((New-Object System.Drawing.Point(($an.X + 40), ($an.Y + 20)))).WorkingArea
+}
+
+function Start-AutoHide {
+    if ($Script:HideTarget -eq 1) { return }
+    $wa = Get-AnchorScreen
+    $cxw = $form.Left + $form.Width / 2
+    $Script:HideSide = if ($cxw -gt ($wa.Left + $wa.Width / 2)) { "right" } else { "left" }
+    $Script:HideTarget = 1
+    if (-not $Script:Cfg.Animations) { $Script:HideP = 1.0; Render }
+    Update-AnimTimer
+}
+
+function Show-FromHide {
+    if ($Script:HideTarget -eq 0) { return }
+    $Script:HideTarget = 0
+    $Script:PeekY = $null
+    $Script:LastInteract = Get-Date
+    if (-not $Script:Cfg.Animations) { $Script:HideP = 0.0; Render }
+    Update-AnimTimer
+}
+
+function Build-Peek($Pal, [string]$Mode) {
+    $M = [single](Px 6)
+    $w = [single](Px 16); $h = [single](Px 84)
+    $at = Get-AnimTime
+    $bmp = New-Object System.Drawing.Bitmap([int]($w + 2 * $M), [int]($h + 2 * $M), [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.Clear([System.Drawing.Color]::Transparent)
+    $pulse = 0.5 + 0.5 * [Math]::Sin($at * 2 * [Math]::PI / $(if ($Mode -eq "overbreak") { 1.1 } else { 2.8 }))
+    $glowA = if ($Mode -in @("stopped", "overbreak")) { [int](40 + 70 * $pulse) } else { 30 }
+    Fill-Round $g (A $Pal.Glow $glowA) 0 0 ($w + 2 * $M) ($h + 2 * $M) (($w + 2 * $M) / 2)
+    $rect = New-Object System.Drawing.RectangleF($M, $M, $w, $h)
+    $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, (A $Pal.Bg1 245), (A $Pal.Bg2 245), [single]90)
+    $pp = New-RoundPath $M $M $w $h ($w / 2)
+    $g.FillPath($lg, $pp); $lg.Dispose(); $pp.Dispose()
+    $n = 7; $rd = [single](Px 2.4); $cx = $M + $w / 2
+    for ($i = 0; $i -lt $n; $i++) {
+        $cy = $M + (Px 12) + $i * (($h - (Px 24)) / ($n - 1))
+        $a = 60
+        switch ($Mode) {
+            "work"      { if ($i -lt [Math]::Ceiling(((Get-LiveElapsed) % 60) / 60.0 * $n)) { $a = 240 } }
+            "break"     { $a = [int](120 + 120 * (0.5 + 0.5 * [Math]::Sin($at * 1.6 - $i * 0.5))) }
+            "overbreak" { $a = [int](80 + 175 * (0.5 + 0.5 * [Math]::Sin($at * 6 - $i * 0.9))) }
+            "stopped"   { $head = ($at * 3.0) % $n; $d = [Math]::Abs($i - $head); $a = [int]([Math]::Max(50, 255 - $d * 70)) }
+        }
+        Fill-Circle $g (A $Pal.Dot $a) $cx $cy $rd
+    }
+    $g.Dispose()
+    return $bmp
+}
+
+function Push-Peek($bmp) {
+    $wa = Get-AnchorScreen
+    $an = Get-Anchor
+    $x = if ($Script:HideSide -eq "right") { $wa.Right - $bmp.Width + (Px 4) } else { $wa.Left - (Px 4) }
+    $y = [int]($form.Top + $form.Height / 2 - $bmp.Height / 2)
+    if ($Script:PeekY) { $y = $Script:PeekY } else { $Script:PeekY = $y }
+    $y = [Math]::Max($wa.Top, [Math]::Min($y, $wa.Bottom - $bmp.Height))
+    $Script:Hits = @([pscustomobject]@{ Name = "peek"; Rect = (New-Object System.Drawing.RectangleF(0, 0, $bmp.Width, $bmp.Height)) })
+    if ($Script:Layered) {
+        try { [EhWin]::PushLayered($form.Handle, $bmp, $x, $y) | Out-Null } catch { }
+        $bmp.Dispose()
+    } else {
+        if ($Script:Frame) { $Script:Frame.Dispose() }
+        $Script:Frame = $bmp
+        $form.SetBounds($x, $y, $bmp.Width, $bmp.Height)
+        $form.Invalidate()
+    }
 }
 
 # ---- edge lights: dots evenly spaced along the inside of the card edge,
@@ -1980,10 +2017,12 @@ function Get-ShadowLayer([int]$bw, [int]$bh, [int]$M, [single]$W, [single]$H, [s
 function Build-Frame($Pal, [string]$Mode) {
     $F = $Script:F; $cfg = $Script:Cfg
     $at = Get-AnimTime
-    $square = ($cfg.Shape -eq "Square")
+    $isLarge = ($cfg.Shape -eq "Large")
+    $square = ($cfg.Shape -eq "Square" -or $isLarge)
+    $expanded = $Script:IsExpanded -or $isLarge
     $M = Get-FrameMargin
     $P = [single](Px 16)
-    $R = [single](Px $cfg.CornerRadius)
+    $R = [single]$(if ($square) { Px 24 } else { Px 16 })
     $hT = [single]$F.Task.GetHeight(); $hB = [single]$F.Time.GetHeight(); $hS = [single]$F.Small.GetHeight()
     $hC = [single]$F.Caps.GetHeight()
     $target = [double]$cfg.DailyTargetHours
@@ -1999,26 +2038,36 @@ function Build-Frame($Pal, [string]$Mode) {
 
     # ---------- what goes where ----------
     if ($square) {
-        $W = [single](Px $cfg.SquareSize)
-        if ($Script:IsExpanded) { $W = [single][Math]::Max($W, (Px 260)) }
+        $W = if ($isLarge) { [single](Px 272) } else { [single](Px $cfg.SquareSize) }
+        if ($expanded) { $W = [single][Math]::Max($W, (Px 260)) }
         $btnD = [single](Px 34)
         $btnX = $W - $P - $btnD; $btnY = $P - (Px 2)
         $capsRect = @(($P + (Px 2)), $P, ($btnX - $P - (Px 8)), ($btnD - (Px 4)))
         $timeFont = $F.TimeBig
         if ((Measure-W "00:00:00" $timeFont) -gt ($W - 2 * $P)) { $timeFont = $F.Time }
         $hTime = [single]$timeFont.GetHeight()
-        $sqH = [single](Px $cfg.SquareSize)
-        $barY = $sqH - $P - (Px 4)
-        # task, timer and total sit as one block, centred between the top row and the bar
         $stackH = ($hT - (Px 2)) + ($hTime - (Px 4)) + $hS
         $top = $btnY + $btnD
-        $taskY = $top + ($barY - (Px 6) - $top - $stackH) / 2
-        $timeY = $taskY + $hT - (Px 2)
-        $todayY = $timeY + $hTime - (Px 4)
+        if ($expanded) {
+            # open: the block sits right under the top row, list follows
+            $taskY = $top + (Px 8)
+            $timeY = $taskY + $hT - (Px 2)
+            $todayY = $timeY + $hTime - (Px 4)
+            $barY = $todayY + $hS + (Px 10)
+            $y = $barY + (Px 4)
+            $collapsedBottom = $y + $P
+        } else {
+            # closed square: the block is centred between the top row and the bar
+            $sqH = [single](Px $cfg.SquareSize)
+            $barY = $sqH - $P - (Px 4)
+            $taskY = $top + ($barY - (Px 6) - $top - $stackH) / 2
+            $timeY = $taskY + $hT - (Px 2)
+            $todayY = $timeY + $hTime - (Px 4)
+            $y = $sqH - $P
+            $collapsedBottom = $sqH
+        }
         $line1 = @(($P + (Px 2)), $taskY, ($W - 2 * $P), $hT)
         $timeRect = @(($P - (Px 1)), $timeY, ($W - 2 * $P), $hTime)
-        $y = $sqH - $P
-        $collapsedBottom = $sqH
     } else {
         $W = [single](Px $cfg.Width)
         $btnD = [single](Px 40)
@@ -2039,14 +2088,14 @@ function Build-Frame($Pal, [string]$Mode) {
     $rows = @(); $more = 0
     $rowH = $hT + (Px 11)
     $btnH = [single](Px 30)
-    if ($Script:IsExpanded) {
+    if ($expanded) {
         $all = @(Get-BreakdownRows)
         $rows = @($all | Select-Object -First 6)
         $more = $all.Count - $rows.Count
         $y += (Px 12) + 1 + (Px 10) + $hS + (Px 8)
         if ($rows.Count -eq 0) { $y += $hT + (Px 8) } else { $y += $rows.Count * $rowH }
         if ($more -gt 0) { $y += $hS + (Px 4) }
-        if ($cfg.ShowWeekTotal) { $y += $hS + (Px 10) }
+        if ($true) { $y += $hS + (Px 10) }
         $y += (Px 6) + $btnH
         $H = [single][Math]::Ceiling($y + $P)
     } else {
@@ -2263,7 +2312,7 @@ function Build-Frame($Pal, [string]$Mode) {
     }
 
     # ---------- expanded: today's breakdown, week, buttons ----------
-    if ($Script:IsExpanded) {
+    if ($expanded) {
         $ey = $expStart + (Px 12)
         $lp = New-Object System.Drawing.Pen((A $Pal.Muted 70), 1)
         $g.DrawLine($lp, $P, $ey, ($W - $P), $ey); $lp.Dispose()
@@ -2298,7 +2347,7 @@ function Build-Frame($Pal, [string]$Mode) {
             Draw-Text $g "+$more more" $F.Small $Pal.Muted $P $ey ($W - 2 * $P) $hS "Left"
             $ey += $hS + (Px 4)
         }
-        if ($cfg.ShowWeekTotal) {
+        if ($true) {
             $ey += (Px 4)
             $wk = Get-WeekTotal
             $wkText = if ($wk -ge 0) { Format-Short $wk } else { "--" }
@@ -2337,26 +2386,33 @@ function Get-Anchor {
     return $Script:Anchor
 }
 
-function Push-Frame($bmp) {
+function Push-Frame($bmp, [double]$slide = 0) {
     $an = Get-Anchor
     $wa = [System.Windows.Forms.Screen]::FromPoint((New-Object System.Drawing.Point(($an.X + 40), ($an.Y + 20)))).WorkingArea
     $M = Get-FrameMargin
-    # grow upwards instead of off the bottom of the screen
-    $py = $an.Y
+    # always keep the whole card on screen: grow up / left instead of off an edge
+    $px = $an.X; $py = $an.Y
+    if ($px + $bmp.Width - $M -gt $wa.Right) { $px = $wa.Right - $bmp.Width + $M }
+    if ($px + $M -lt $wa.Left) { $px = $wa.Left - $M }
     if ($py + $bmp.Height - $M -gt $wa.Bottom) { $py = $wa.Bottom - $bmp.Height + $M }
     if ($py + $M -lt $wa.Top) { $py = $wa.Top - $M }
+    if ($slide -gt 0) {
+        # sliding into the side edge (auto-hide)
+        $tx = if ($Script:HideSide -eq "right") { $wa.Right - $M } else { $wa.Left - $bmp.Width + $M }
+        $px = [int]($px + ($tx - $px) * $slide)
+    }
     if ($Script:Layered) {
         $ok = $false
-        try { $ok = [EhWin]::PushLayered($form.Handle, $bmp, $an.X, $py) } catch { }
+        try { $ok = [EhWin]::PushLayered($form.Handle, $bmp, $px, $py) } catch { }
         $bmp.Dispose()
         if (-not $ok) { Switch-ToBasicWindow }
         return
     }
     if ($Script:Frame) { $Script:Frame.Dispose() }
     $Script:Frame = $bmp
-    $form.SetBounds($an.X, $py, $bmp.Width, $bmp.Height)
+    $form.SetBounds($px, $py, $bmp.Width, $bmp.Height)
     try {
-        $p = New-RoundPath 0 0 $bmp.Width $bmp.Height (Px $Script:Cfg.CornerRadius)
+        $p = New-RoundPath 0 0 $bmp.Width $bmp.Height (Px $(if ($Script:Cfg.Shape -eq "Wide") { 16 } else { 24 }))
         $form.Region = New-Object System.Drawing.Region($p); $p.Dispose()
     } catch { }
     $form.Invalidate()
@@ -2395,13 +2451,15 @@ function Place-Form {
     }
     $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
     $M = Get-FrameMargin
-    $cw = if ($Script:Cfg.Shape -eq "Square") { $Script:Cfg.SquareSize } else { $Script:Cfg.Width }
-    $w = (Px $cw) + 2 * $M
+    $w = (Get-ShapeWidth) + 2 * $M
     $h = Get-CollapsedFrameHeight
     $Script:Anchor = New-Object System.Drawing.Point(($wa.Right - $w - (Px 8) + $M), ($wa.Bottom - $h - (Px 8) + $M))
 }
 
+function Test-ShowsList { return ($Script:IsExpanded -or $Script:Cfg.Shape -eq "Large") }
+
 function Set-Expanded([bool]$on) {
+    if ($Script:Cfg.Shape -eq "Large") { $on = $false }    # Large is always open
     $Script:IsExpanded = $on
     $Script:LastInteract = Get-Date
     if ($on) {
@@ -2414,524 +2472,1007 @@ function Set-Expanded([bool]$on) {
 
 # ===========================================================================
 #  ANIMATION CLOCK
-#  20 fps while colours change, 15 fps for the red / break effects, 8 fps
-#  for the calm "work" look,
-#  nothing extra when animations are off (the 1-second clock redraws then).
+#  30 fps while sliding or changing colour, 20 fps for the red / break
+#  effects, 10 fps for the calm "work" look. Everything is time-based, so
+#  motion stays even if a frame is late. Nothing extra when animations are
+#  off (the 1-second clock redraws then).
 # ===========================================================================
+$Script:LastAnimAt = 0.0
 $animTimer = New-Object System.Windows.Forms.Timer
 $animTimer.Interval = 50
 $animTimer.Add_Tick({
+    $now = $Script:Clock.Elapsed.TotalSeconds
+    $dt = [Math]::Min(0.1, [Math]::Max(0.0, $now - $Script:LastAnimAt))
+    $Script:LastAnimAt = $now
+    if ($Script:HideP -ne $Script:HideTarget) {
+        $step = $dt / 0.32
+        if ($Script:HideTarget -eq 1) { $Script:HideP = [Math]::Min(1.0, $Script:HideP + $step) }
+        else { $Script:HideP = [Math]::Max(0.0, $Script:HideP - $step) }
+    }
     Update-ModeAndPalette
     if (-not $Script:Dragging) { Render }
-    $want = if (-not $Script:PalSettled) { 50 } elseif ($Script:Mode -in @("stopped", "overbreak", "break")) { 66 } else { 125 }
+    $sliding = ($Script:HideP -gt 0 -and $Script:HideP -lt 1)
+    $want = if ($sliding -or -not $Script:PalSettled) { 33 }
+            elseif ($Script:HideP -ge 1) { 80 }
+            elseif ($Script:Mode -in @("stopped", "overbreak", "break")) { 50 }
+            else { 100 }
     if ($animTimer.Interval -ne $want) { $animTimer.Interval = $want }
 })
 function Update-AnimTimer {
     if (-not $Script:Ready) { return }
-    if ($Script:Cfg.Animations) { if (-not $animTimer.Enabled) { $animTimer.Start() } }
+    if ($Script:Cfg.Animations) { if (-not $animTimer.Enabled) { $Script:LastAnimAt = $Script:Clock.Elapsed.TotalSeconds; $animTimer.Start() } }
     else { $animTimer.Stop() }
 }
 
 # ===========================================================================
-#  SETTINGS
+#  SETTINGS + SETUP HUB
+#  One widget-style card for both the first-run questions and Settings.
+#  Pages slide in and out, one question at a time; every answer is saved and
+#  shown on the widget straight away - there is no Save button.
 # ===========================================================================
-function New-Toggle([string]$text, [bool]$on, [int]$x, [int]$y, [int]$w) {
-    $p = New-Object System.Windows.Forms.Panel
-    $p.Location = New-Object System.Drawing.Point((Px $x), (Px $y))
-    $p.Size = New-Object System.Drawing.Size((Px $w), (Px 30))
-    $p.BackColor = $UI.Bg
-    $p.Cursor = "Hand"
-    $p.Tag = @{ On = $on; Text = $text }
-    Set-DoubleBuffered $p
-    $p.Add_Paint({
-        param($s, $e)
-        $g = $e.Graphics
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $sw = [single](Px 36); $sh = [single](Px 20)
-        $sx = $s.Width - $sw - 2; $sy = ($s.Height - $sh) / 2
-        $col = if ($s.Tag.On) { $UI.Accent } else { $UI.Line }
-        Fill-Round $g $col $sx $sy $sw $sh ($sh / 2)
-        $kd = $sh - (Px 6)
-        $kx = if ($s.Tag.On) { $sx + $sw - $kd - (Px 3) } else { $sx + (Px 3) }
-        Fill-Round $g ([System.Drawing.Color]::White) $kx ($sy + (Px 3)) $kd $kd ($kd / 2)
-        $r = New-Object System.Drawing.Rectangle(0, 0, [int]($sx - (Px 8)), $s.Height)
-        [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$s.Tag.Text, $FontUI, $r, $UI.Text,
-            ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
-    })
-    $p.Add_Click({ param($s, $e) $s.Tag.On = -not $s.Tag.On; $s.Invalidate(); Preview-Settings })
-    return $p
+$Script:TextSizes = [ordered]@{ "S" = @{ Time = 15; Task = 8.5 }; "M" = @{ Time = 18; Task = 9 }; "L" = @{ Time = 22; Task = 10.5 } }
+$Script:SetupPages = @("welcome", "connect", "theme", "shape", "font", "size", "workday", "breaks", "target", "finish")
+$Script:HubW = 400
+
+function Set-Cfg([string]$key, $value) {
+    $Script:Cfg[$key] = $value
+    Save-Config
+    Apply-Theme
 }
 
-function New-DayChip([string]$day, [bool]$on, [int]$x, [int]$y) {
-    $p = New-Object System.Windows.Forms.Panel
-    $p.Location = New-Object System.Drawing.Point((Px $x), (Px $y))
-    $p.Size = New-Object System.Drawing.Size((Px 40), (Px 28))
-    $p.BackColor = $UI.Bg
-    $p.Cursor = "Hand"
-    $p.Tag = @{ On = $on; Text = $day }
-    Set-DoubleBuffered $p
-    $p.Add_Paint({
-        param($s, $e)
-        $g = $e.Graphics
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $col = if ($s.Tag.On) { $UI.Accent } else { $UI.Card }
-        Fill-Round $g $col 0 0 ($s.Width - 1) ($s.Height - 1) (Px 7)
-        $tc = if ($s.Tag.On) { [System.Drawing.Color]::White } else { $UI.Muted }
-        $r = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
-        [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$s.Tag.Text, $FontSmall, $r, $tc,
-            ([System.Windows.Forms.TextFormatFlags]::HorizontalCenter -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
-    })
-    $p.Add_Click({ param($s, $e) $s.Tag.On = -not $s.Tag.On; $s.Invalidate() })
-    return $p
+function Toggle-Cfg([string]$key) {
+    if ($key -eq "_autostart") {
+        if (Test-Autostart) { Remove-Autostart } else { Install-Autostart | Out-Null }
+        return
+    }
+    Set-Cfg $key (-not [bool]$Script:Cfg[$key])
+    if ($key -eq "HotkeyEnabled") { Register-Hotkey }
+    if ($key -eq "AutoHide" -and -not $Script:Cfg.AutoHide) { Show-FromHide }
 }
 
-# Theme tile. In Settings it fills the colour swatches; in the setup guide it
-# sets the colours directly.
-function New-ThemeTile([string]$name, [int]$x, [int]$y, [int]$w, [int]$h = 52) {
+function Get-CurrentThemeName {
+    foreach ($name in $Script:Themes.Keys) {
+        $t = $Script:Themes[$name]; $same = $true
+        foreach ($k in $t.Keys) { if ([string]$Script:Cfg[$k] -ne $t[$k]) { $same = $false } }
+        if ($same) { return $name }
+    }
+    return "Custom"
+}
+
+function Format-Days([string]$days) {
+    $d = @(([string]$days) -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if (($d -join ",") -eq "Mon,Tue,Wed,Thu,Fri") { return "Mon-Fri" }
+    if (($d -join ",") -eq "Mon,Tue,Wed,Thu,Fri,Sat") { return "Mon-Sat" }
+    if ($d.Count -eq 7) { return "Every day" }
+    if ($d.Count -eq 0) { return "No days" }
+    return ($d -join ", ")
+}
+
+# ---------------------------------------------------------------------------
+#  Hub building blocks (logical 96-DPI coordinates; scaled inside)
+# ---------------------------------------------------------------------------
+function Add-HubCtrl($p, $c) { $p.Controls.Add($c); return $c }
+
+function New-PaintPanel([int]$x, [int]$y, [int]$w, [int]$h) {
     $p = New-Object System.Windows.Forms.Panel
     $p.Location = New-Object System.Drawing.Point((Px $x), (Px $y))
     $p.Size = New-Object System.Drawing.Size((Px $w), (Px $h))
     $p.BackColor = $UI.Bg
-    $p.Cursor = "Hand"
-    $p.Tag = $name
     Set-DoubleBuffered $p
+    return $p
+}
+
+function Start-Paint($e) {
+    $g = $e.Graphics
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::ClearTypeGridFit
+    return $g
+}
+
+function Draw-UiText($g, [string]$text, $font, $color, $rect, [string]$align = "Left") {
+    $flags = [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor [System.Windows.Forms.TextFormatFlags]::EndEllipsis -bor [System.Windows.Forms.TextFormatFlags]::NoPrefix
+    $flags = $flags -bor $(switch ($align) { "Right" { [System.Windows.Forms.TextFormatFlags]::Right } "Center" { [System.Windows.Forms.TextFormatFlags]::HorizontalCenter } default { [System.Windows.Forms.TextFormatFlags]::Left } })
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $text, $font, $rect, $color, $flags)
+}
+
+# A switch bound straight to a config key (or "_autostart").
+function New-HubToggle([string]$label, [string]$key, [int]$x, [int]$y, [int]$w = 352, [string]$sub = "") {
+    $h = if ($sub) { 48 } else { 36 }
+    $p = New-PaintPanel $x $y $w $h
+    $p.Cursor = "Hand"
+    $p.Tag = @{ Key = $key; Text = $label; Sub = $sub }
     $p.Add_Paint({
         param($s, $e)
-        $g = $e.Graphics
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $t = $Script:Themes[[string]$s.Tag]
-        $sel = $true
-        foreach ($k in $t.Keys) {
-            $cur = if ($Script:SettingsOpen -and $Script:SC.Swatch) { ToHex $Script:SC.Swatch[$k].BackColor } else { [string]$Script:Cfg[$k] }
-            if ($cur -ne $t[$k]) { $sel = $false }
-        }
-        Fill-Round $g (ToColor $t.BackColor) 1 1 ($s.Width - 3) ($s.Height - 3) (Px 9)
-        $pc = if ($sel) { $UI.Accent } else { $UI.Line }
-        $pw = if ($sel) { 2 } else { 1 }
-        $pen = New-Object System.Drawing.Pen($pc, $pw)
-        $pp = New-RoundPath 1 1 ($s.Width - 3) ($s.Height - 3) (Px 9)
-        $g.DrawPath($pen, $pp); $pp.Dispose(); $pen.Dispose()
-        $d = [single](Px 10)
-        Fill-Round $g (ToColor $t.AccentColor) (Px 9) (Px 9) $d $d ($d / 2)
-        $r = New-Object System.Drawing.Rectangle((Px 8), (Px 24), ($s.Width - (Px 12)), (Px 22))
-        [System.Windows.Forms.TextRenderer]::DrawText($g, [string]$s.Tag, $FontSmall, $r, (ToColor $t.TaskColor),
-            ([System.Windows.Forms.TextFormatFlags]::Left -bor [System.Windows.Forms.TextFormatFlags]::VerticalCenter))
-    })
-    $p.Add_Click({
-        param($s, $e)
-        $t = $Script:Themes[[string]$s.Tag]
-        if ($Script:SettingsOpen) {
-            foreach ($k in $t.Keys) { Set-Swatch $Script:SC.Swatch[$k] (ToColor $t[$k]) }
-            foreach ($tile in $Script:SC.Tiles) { $tile.Invalidate() }
-            Preview-Settings
+        $g = Start-Paint $e
+        $on = if ($s.Tag.Key -eq "_autostart") { Test-Autostart } else { [bool]$Script:Cfg[$s.Tag.Key] }
+        $sw = [single](Px 38); $sh = [single](Px 22)
+        $sx = $s.Width - $sw - 2; $sy = ($s.Height - $sh) / 2
+        Fill-Round $g $(if ($on) { $UI.Accent } else { $UI.Line }) $sx $sy $sw $sh ($sh / 2)
+        $kd = $sh - (Px 6)
+        $kx = if ($on) { $sx + $sw - $kd - (Px 3) } else { $sx + (Px 3) }
+        Fill-Round $g ([System.Drawing.Color]::White) $kx ($sy + (Px 3)) $kd $kd ($kd / 2)
+        if ($s.Tag.Sub) {
+            Draw-UiText $g $s.Tag.Text $FontUI $UI.Text (New-Object System.Drawing.Rectangle(0, (Px 3), [int]($sx - (Px 8)), (Px 22)))
+            Draw-UiText $g $s.Tag.Sub $FontSmall $UI.Muted (New-Object System.Drawing.Rectangle(0, (Px 24), [int]($sx - (Px 8)), (Px 20)))
         } else {
-            foreach ($k in $t.Keys) { $Script:Cfg[$k] = $t[$k] }
-            Apply-Theme
-            foreach ($c in $s.Parent.Controls) { $c.Invalidate() }
+            Draw-UiText $g $s.Tag.Text $FontUI $UI.Text (New-Object System.Drawing.Rectangle(0, 0, [int]($sx - (Px 8)), $s.Height))
+        }
+    })
+    $p.Add_Click({ param($s, $e) Toggle-Cfg $s.Tag.Key; $s.Invalidate() })
+    return $p
+}
+
+# Pill chips. $Get returns the current value; $Set receives the picked value.
+# -Unit adds a "Custom" chip that turns into a small number box.
+function New-Chips($opts, [int]$x, [int]$y, [int]$w, [scriptblock]$Get, [scriptblock]$Set, [string]$Unit = "", [switch]$Multi) {
+    $all = @($opts)
+    if ($Unit) { $all += @{ L = "Custom"; V = "__custom" } }
+    # lay the chips out once, wrapping onto new rows
+    $rects = @(); $cx = 0; $cy = 0; $ch = Px 34; $gap = Px 8
+    foreach ($o in $all) {
+        $tw = [System.Windows.Forms.TextRenderer]::MeasureText([string]$o.L, $FontUIBold).Width + (Px 26)
+        if ($o.V -eq "__custom") { $tw += Px 34 }
+        if ($cx -gt 0 -and $cx + $tw -gt (Px $w)) { $cx = 0; $cy += $ch + $gap }
+        $rects += [pscustomobject]@{ Opt = $o; Rect = (New-Object System.Drawing.Rectangle($cx, $cy, $tw, $ch)) }
+        $cx += $tw + $gap
+    }
+    $p = New-PaintPanel $x $y $w 10
+    $p.Height = $cy + $ch + 2
+    $p.Cursor = "Hand"
+    $p.Tag = @{ Rects = $rects; Get = $Get; Set = $Set; Unit = $Unit; Multi = [bool]$Multi; Box = $null; Vals = @($opts | ForEach-Object { $_.V }) }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $t = $s.Tag
+        $cur = & $t.Get
+        foreach ($r in $t.Rects) {
+            $v = $r.Opt.V
+            $sel = if ($t.Multi) { @($cur) -contains $v } elseif ($v -eq "__custom") { $null -ne $cur -and -not ($t.Vals -contains $cur) } else { $cur -eq $v }
+            $rc = $r.Rect
+            Fill-Round $g $(if ($sel) { $UI.Accent } else { $UI.Card }) $rc.X $rc.Y ($rc.Width - 1) ($rc.Height - 1) ($rc.Height / 2)
+            $lbl = [string]$r.Opt.L
+            if ($v -eq "__custom" -and $sel) { $lbl = "$cur $($t.Unit)" }
+            $fc = if ($sel) { [System.Drawing.Color]::White } else { $UI.Text }
+            Draw-UiText $g $lbl $FontUIBold $fc $rc "Center"
+        }
+    })
+    $p.Add_MouseClick({
+        param($s, $e)
+        $t = $s.Tag
+        foreach ($r in $t.Rects) {
+            if (-not $r.Rect.Contains($e.Location)) { continue }
+            $v = $r.Opt.V
+            if ($v -eq "__custom") {
+                if (-not $t.Box) {
+                    $tb = New-Object System.Windows.Forms.TextBox
+                    $tb.Font = $FontUIBold; $tb.BorderStyle = "None"; $tb.TextAlign = "Center"
+                    $tb.BackColor = $UI.Accent; $tb.ForeColor = [System.Drawing.Color]::White
+                    $tb.Tag = $s
+                    $tb.Add_KeyDown({ param($b, $ev) if ($ev.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $ev.SuppressKeyPress = $true; Commit-ChipBox $b } })
+                    $tb.Add_Leave({ Commit-ChipBox $this })
+                    $s.Controls.Add($tb)
+                    $t.Box = $tb
+                }
+                $rc = $r.Rect
+                $t.Box.SetBounds(($rc.X + (Px 12)), ($rc.Y + (Px 8)), ($rc.Width - (Px 24)), (Px 18))
+                $cur = & $t.Get
+                $t.Box.Text = if ($null -ne $cur -and -not ($t.Vals -contains $cur)) { [string]$cur } else { "" }
+                $t.Box.Visible = $true
+                $t.Box.Focus() | Out-Null
+            } elseif ($t.Multi) {
+                $cur = @(& $t.Get)
+                $new = if ($cur -contains $v) { @($cur | Where-Object { $_ -ne $v }) } else { @($cur + $v) }
+                & $t.Set $new
+            } else {
+                & $t.Set $v
+            }
+            $s.Invalidate()
+            return
         }
     })
     return $p
 }
 
-function Set-Swatch($btn, $color) {
-    $btn.BackColor = $color
-    $btn.Text = ToHex $color
-    $btn.ForeColor = if (IsLight $color) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::White }
-    $btn.FlatAppearance.MouseOverBackColor = $color
+function Commit-ChipBox($tb) {
+    if (-not $tb.Visible) { return }
+    $tb.Visible = $false
+    $chips = $tb.Tag
+    $n = 0.0
+    if ([double]::TryParse($tb.Text.Trim(), [ref]$n) -and $n -gt 0) { & $chips.Tag.Set $n }
+    $chips.Invalidate()
 }
 
-function Read-SettingsControls {
-    $sc = $Script:SC; $c = $Script:Cfg
-    foreach ($k in $sc.Swatch.Keys) { $c[$k] = ToHex $sc.Swatch[$k].BackColor }
-    $c.Opacity             = [int]$sc.Opacity.Value
-    $c.FontFamily          = [string]$sc.Font.SelectedItem
-    $tf = [string]$sc.TimerFont.SelectedItem
-    $c.TimerFontFamily     = if ($tf -eq "Same as text") { "" } else { $tf }
-    $c.Shape               = [string]$sc.Shape.SelectedItem
-    $c.Width               = [int]$sc.Width.Value
-    $c.SquareSize          = [int]$sc.Square.Value
-    $c.TimeFontSize        = [int]$sc.TimeSize.Value
-    $c.TaskFontSize        = [int]$sc.TaskSize.Value
-    $c.CornerRadius        = [int]$sc.Radius.Value
-    $c.Animations          = [bool]$sc.Anim.Tag.On
-    $c.EdgeLights          = [bool]$sc.Edge.Tag.On
-    $c.RedWhenStopped      = [bool]$sc.Red.Tag.On
-    $c.BreakLimitMinutes   = [int]$sc.BreakMin.Value
-    $c.BreakKeywords       = $sc.BreakWords.Text.Trim()
-    $c.AlwaysOnTop         = [bool]$sc.Top.Tag.On
-    $c.HideFromCapture     = [bool]$sc.Hide.Tag.On
-    $c.ShowSeconds         = [bool]$sc.Seconds.Tag.On
-    $c.ShowTodayTotal      = [bool]$sc.Today.Tag.On
-    $c.ShowWeekTotal       = [bool]$sc.Week.Tag.On
-    $c.ConfirmSwitch       = [bool]$sc.Confirm.Tag.On
-    $c.DailyTargetHours    = [double]$sc.Target.Value
-    $c.RefreshSeconds      = [int]$sc.Refresh.Value
-    $c.AutoCollapseSeconds = [int]$sc.Collapse.Value
-    $c.HotkeyEnabled       = [bool]$sc.HotOn.Tag.On
-    $c.Hotkey              = $sc.Hot.Text.Trim()
-    $c.IdleNudge           = [bool]$sc.Nudge.Tag.On
-    $c.IdleNudgeMinutes    = [int]$sc.NudgeMin.Value
-    $c.WorkStart           = [string]$sc.WStart.SelectedItem
-    $c.WorkEnd             = [string]$sc.WEnd.SelectedItem
-    $c.WorkDays            = (@($sc.Days | Where-Object { $_.Tag.On } | ForEach-Object { $_.Tag.Key })) -join ","
+# A row you tap to open another page.
+function New-NavRow([string]$label, [scriptblock]$Value, [string]$page, [int]$x, [int]$y, [int]$w = 352) {
+    $p = New-PaintPanel $x $y $w 46
+    $p.Cursor = "Hand"
+    $p.Tag = @{ Text = $label; Value = $Value; Page = $page; Hover = $false; Action = $null }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $bg = if ($s.Tag.Hover) { $UI.Sel } else { $UI.Card }
+        Fill-Round $g $bg 0 0 ($s.Width - 1) ($s.Height - 1) (Px 10)
+        $vw = [int]($s.Width * 0.5)
+        Draw-UiText $g $s.Tag.Text $FontUI $(if ($s.Tag.Danger) { $UI.Danger } else { $UI.Text }) (New-Object System.Drawing.Rectangle((Px 14), 0, ($s.Width - $vw), $s.Height))
+        $val = if ($s.Tag.Value) { [string](& $s.Tag.Value) } else { "" }
+        Draw-UiText $g $val $FontUI $UI.Muted (New-Object System.Drawing.Rectangle(($s.Width - $vw - (Px 30)), 0, $vw, $s.Height)) "Right"
+        if ($s.Tag.Page) { Draw-UiText $g ([string][char]0x203A) $FontTitle $UI.Muted (New-Object System.Drawing.Rectangle(($s.Width - (Px 26)), 0, (Px 18), $s.Height)) "Center" }
+    })
+    $p.Add_MouseEnter({ $this.Tag.Hover = $true; $this.Invalidate() })
+    $p.Add_MouseLeave({ $this.Tag.Hover = $false; $this.Invalidate() })
+    $p.Add_Click({
+        param($s, $e)
+        if ($s.Tag.Action) { & $s.Tag.Action } elseif ($s.Tag.Page) { Hub-Go $s.Tag.Page 1 -Push }
+    })
+    return $p
+}
+function New-ActionRow([string]$label, [scriptblock]$Action, [int]$x, [int]$y, [switch]$Danger) {
+    $p = New-NavRow $label $null "" $x $y
+    $p.Tag.Action = $Action
+    $p.Tag.Danger = [bool]$Danger
+    return $p
 }
 
-# Everything previews live on the widget; Cancel puts it all back.
-function Preview-Settings {
-    if (-not $Script:SettingsLive) { return }
-    Read-SettingsControls
-    $Script:Anchor = $null; Place-Form
-    Apply-Theme
+function New-Caps([string]$text, [int]$x, [int]$y) { return New-Label $text.ToUpper() $x $y 352 18 $FontCaps $UI.Muted }
+
+# iOS-style scrolling wheel (hours / minutes). Drag, scroll or click above /
+# below the middle; it glides to the nearest value.
+function New-Wheel($values, [int]$index, [int]$x, [int]$y, [int]$w, [int]$h, [scriptblock]$OnChange) {
+    $p = New-PaintPanel $x $y $w $h
+    $p.Cursor = "SizeNS"
+    $p.Tag = @{ Vals = @($values); Idx = $index; Off = [double]$index; Drag = $false; Moved = $false; Y0 = 0; Off0 = 0.0; OnChange = $OnChange }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $t = $s.Tag; $n = $t.Vals.Count
+        Fill-Round $g $UI.Card 0 0 ($s.Width - 1) ($s.Height - 1) (Px 12)
+        $rh = [single](Px 34); $mid = $s.Height / 2
+        Fill-Round $g $UI.Sel (Px 4) ($mid - $rh / 2) ($s.Width - (Px 8)) $rh (Px 8)
+        $base = [int][Math]::Floor($t.Off)
+        for ($k = $base - 3; $k -le $base + 4; $k++) {
+            $d = $k - $t.Off
+            $cy = $mid + $d * $rh
+            $ad = [Math]::Abs($d)
+            if ($ad -gt 2.6) { continue }
+            $a = [int](255 * [Math]::Max(0.12, 1 - $ad / 2.6))
+            $font = if ($ad -lt 0.5) { Get-SceneFont ([single](Px 22)) -Bold } else { Get-SceneFont ([single](Px 17)) }
+            $v = $t.Vals[(($k % $n) + $n) % $n]
+            Draw-Text $g ([string]$v) $font (A $UI.Text $a) 0 ($cy - $rh / 2) $s.Width $rh "Center"
+        }
+    })
+    $p.Add_MouseDown({ param($s, $e) $s.Tag.Drag = $true; $s.Tag.Moved = $false; $s.Tag.Y0 = $e.Y; $s.Tag.Off0 = $s.Tag.Off })
+    $p.Add_MouseMove({
+        param($s, $e)
+        if (-not $s.Tag.Drag) { return }
+        $dy = $e.Y - $s.Tag.Y0
+        if ([Math]::Abs($dy) -gt 3) { $s.Tag.Moved = $true }
+        if ($s.Tag.Moved) { $s.Tag.Off = $s.Tag.Off0 - $dy / (Px 34); $s.Tag.Idx = [int][Math]::Round($s.Tag.Off); $s.Invalidate() }
+    })
+    $p.Add_MouseUp({
+        param($s, $e)
+        $t = $s.Tag
+        if (-not $t.Drag) { return }
+        $t.Drag = $false
+        if (-not $t.Moved) {
+            if ($e.Y -lt $s.Height / 2 - (Px 17)) { $t.Idx-- } elseif ($e.Y -gt $s.Height / 2 + (Px 17)) { $t.Idx++ }
+        }
+        Fire-Wheel $s
+    })
+    $p.Add_MouseWheel({ param($s, $e) if ($e.Delta -gt 0) { $s.Tag.Idx-- } else { $s.Tag.Idx++ }; Fire-Wheel $s })
+    $p.Add_MouseEnter({ $this.Focus() | Out-Null })
+    $Script:Hub.Wheels += $p
+    return $p
+}
+function Get-WheelValue($wh) { $n = $wh.Tag.Vals.Count; return $wh.Tag.Vals[((($wh.Tag.Idx) % $n) + $n) % $n] }
+function Fire-Wheel($wh) { if ($wh.Tag.OnChange) { & $wh.Tag.OnChange } }
+
+# Live widget preview inside the hub (sample data, current look).
+function New-PreviewStage([int]$x, [int]$y, [int]$w, [int]$h, [string[]]$modes) {
+    $p = New-PaintPanel $x $y $w $h
+    $p.Tag = @{ Modes = $modes }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        Fill-Round $g (ToColor "#101013") 0 0 ($s.Width - 1) ($s.Height - 1) (Px 14)
+        $t = Get-HubTime
+        $ms = $s.Tag.Modes
+        $i = [int][Math]::Floor($t / 3.5) % $ms.Count
+        try {
+            $bmp = Build-DemoFrame $ms[$i] $t
+            $sc = [Math]::Min(1.0, [Math]::Min(($s.Width - (Px 16)) / $bmp.Width, ($s.Height - (Px 26)) / $bmp.Height))
+            $bw = [int]($bmp.Width * $sc); $bh = [int]($bmp.Height * $sc)
+            $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+            $g.DrawImage($bmp, [int](($s.Width - $bw) / 2), [int](($s.Height - (Px 18) - $bh) / 2), $bw, $bh)
+            $bmp.Dispose()
+        } catch { }
+        if ($ms.Count -gt 1) {
+            $names = @{ work = "Working"; break = "On a break"; overbreak = "Break over the limit"; stopped = "Timer off" }
+            Draw-UiText $g $names[$ms[$i]] $FontSmall $UI.Muted (New-Object System.Drawing.Rectangle(0, ($s.Height - (Px 22)), $s.Width, (Px 20))) "Center"
+        }
+    })
+    $Script:Hub.Stages += $p
+    return $p
 }
 
-function Show-Settings {
-    if ($Script:SettingsOpen) { return }
-    $Script:SettingsOpen = $true
-    $Script:SettingsLive = $false
-    $Script:SettingsSaved = $false
-    $Script:RunGuideAfter = $false
-    $Script:CfgSnap = Copy-Config
-    $Script:SC = @{ Swatch = @{}; Tiles = @(); Days = @() }
+# The three tutorial scenes, playing one after another, shrunk to fit.
+function New-TutorialStage([int]$x, [int]$y, [int]$w, [int]$h) {
+    $p = New-PaintPanel $x $y $w $h
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $t = (Get-HubTime) % 19.2
+        $sc = [single]($s.Width / 512.0)
+        $g.ScaleTransform($sc, $sc)
+        try {
+            if ($t -lt 6.4) { Draw-SceneProfile $g $t; $cap = "1  Open My Profile" }
+            elseif ($t -lt 13.6) { Draw-SceneToken $g ($t - 6.4); $cap = "2  Copy the API Token" }
+            else { Draw-ScenePaste $g ($t - 13.6); $cap = "3  Paste it below" }
+            Draw-Pill $g $cap ([System.Drawing.Color]::FromArgb(230, 20, 20, 24)) ([System.Drawing.Color]::White) 10 200
+        } catch { }
+    })
+    $Script:Hub.Stages += $p
+    return $p
+}
 
-    $d = New-Dialog "Settings" 500 720
-    $f = $d.Form
-    $d.Title.Text = "Widget settings"
+function New-ThemeTile([string]$name, [int]$x, [int]$y, [int]$w, [int]$h = 64) {
+    $p = New-PaintPanel $x $y $w $h
+    $p.Cursor = "Hand"
+    $p.Tag = $name
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $t = $Script:Themes[[string]$s.Tag]
+        $sel = ((Get-CurrentThemeName) -eq [string]$s.Tag)
+        $bg = ToColor $t.BackColor
+        $rect = New-Object System.Drawing.RectangleF(1, 1, ($s.Width - 3), ($s.Height - 3))
+        $lg = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $bg, (Mix $bg (ToColor $t.AccentColor) 0.18), [single]30)
+        $pp = New-RoundPath 1 1 ($s.Width - 3) ($s.Height - 3) (Px 12)
+        $g.FillPath($lg, $pp); $lg.Dispose()
+        $pen = New-Object System.Drawing.Pen($(if ($sel) { $UI.Accent } else { $UI.Line }), $(if ($sel) { 2.5 } else { 1 }))
+        $g.DrawPath($pen, $pp); $pp.Dispose(); $pen.Dispose()
+        for ($i = 0; $i -lt 6; $i++) { Fill-Circle $g (A (ToColor $t.AccentColor) $(if ($i -lt 4) { 230 } else { 60 })) ((Px 12) + $i * (Px 7)) (Px 13) ([single](Px 2)) }
+        Draw-UiText $g ([string]$s.Tag) $FontUIBold (ToColor $t.TaskColor) (New-Object System.Drawing.Rectangle((Px 10), ($s.Height - (Px 30)), ($s.Width - (Px 14)), (Px 24)))
+    })
+    $p.Add_Click({
+        param($s, $e)
+        $t = $Script:Themes[[string]$s.Tag]
+        foreach ($k in $t.Keys) { $Script:Cfg[$k] = $t[$k] }
+        Save-Config; Apply-Theme
+        foreach ($c in $s.Parent.Controls) { $c.Invalidate() }
+    })
+    return $p
+}
 
-    $footH = Px 66
-    $foot = New-Object System.Windows.Forms.Panel
-    $foot.Size = New-Object System.Drawing.Size($f.Width, $footH)
-    $foot.Location = New-Object System.Drawing.Point(0, ($f.Height - $footH))
-    $foot.BackColor = $UI.Bg
-    $f.Controls.Add($foot)
-    $fl = New-Object System.Windows.Forms.Panel
-    $fl.Size = New-Object System.Drawing.Size($f.Width, 1); $fl.BackColor = $UI.Line
-    $foot.Controls.Add($fl)
+function New-ShapeTile([string]$name, [string]$desc, [int]$x, [int]$y, [int]$w, [int]$h) {
+    $p = New-PaintPanel $x $y $w $h
+    $p.Cursor = "Hand"
+    $p.Tag = @{ Name = $name; Desc = $desc }
+    $p.Add_Paint({
+        param($s, $e)
+        $g = Start-Paint $e
+        $nm = $s.Tag.Name
+        $sel = ([string]$Script:Cfg.Shape -eq $nm)
+        Fill-Round $g $(if ($sel) { $UI.Sel } else { $UI.Card }) 1 1 ($s.Width - 3) ($s.Height - 3) (Px 12)
+        if ($sel) { $pen = New-Object System.Drawing.Pen($UI.Accent, 2.5); $pp = New-RoundPath 1 1 ($s.Width - 3) ($s.Height - 3) (Px 12); $g.DrawPath($pen, $pp); $pp.Dispose(); $pen.Dispose() }
+        $acc = ToColor $Script:Cfg.AccentColor
+        $cx = $s.Width / 2; $top = Px 16
+        switch ($nm) {
+            "Wide"   { $rw = Px 80; $rh = Px 30 }
+            "Square" { $rw = Px 52; $rh = Px 52 }
+            default  { $rw = Px 56; $rh = Px 76 }
+        }
+        $rx = $cx - $rw / 2
+        Fill-Round $g (ToColor "#2E2E36") $rx $top $rw $rh (Px 8)
+        Fill-Circle $g $acc ($rx + $rw - (Px 9)) ($top + (Px 9)) ([single](Px 5))
+        Fill-Round $g (ToColor "#8B8B96") ($rx + (Px 6)) ($top + $rh / 2 - (Px 3)) ($rw * 0.45) (Px 5) (Px 2)
+        Fill-Round $g $acc ($rx + (Px 6)) ($top + $rh - (Px 9)) ($rw * 0.5) (Px 3) (Px 1)
+        if ($nm -eq "Large") { for ($i = 0; $i -lt 3; $i++) { Fill-Round $g (ToColor "#45454F") ($rx + (Px 6)) ($top + $rh * 0.6 + $i * (Px 6) - (Px 20)) ($rw - (Px 12)) (Px 2) (Px 1) } }
+        Draw-UiText $g $nm $FontUIBold $UI.Text (New-Object System.Drawing.Rectangle(0, ($s.Height - (Px 46)), $s.Width, (Px 22))) "Center"
+        Draw-UiText $g $s.Tag.Desc $FontSmall $UI.Muted (New-Object System.Drawing.Rectangle((Px 4), ($s.Height - (Px 26)), ($s.Width - (Px 8)), (Px 20))) "Center"
+    })
+    $p.Add_Click({
+        param($s, $e)
+        $Script:IsExpanded = $false
+        Set-Cfg "Shape" $s.Tag.Name
+        foreach ($c in $s.Parent.Controls) { $c.Invalidate() }
+    })
+    return $p
+}
 
-    $btnReset  = New-FlatButton -Text "Reset" -X 20 -Y 16 -W 80 -H 34 -Ghost
-    $btnCancel = New-FlatButton -Text "Cancel" -X 286 -Y 16 -W 90 -H 34
-    $btnSave   = New-FlatButton -Text "Save" -X 384 -Y 16 -W 96 -H 34 -Primary
-    $Script:SC.Status = New-Label "" 108 16 172 34 $FontSmall $UI.Muted
-    $Script:SC.Status.TextAlign = "MiddleLeft"
-    foreach ($b in @($btnReset, $Script:SC.Status, $btnCancel, $btnSave)) { $foot.Controls.Add($b) }
-
-    $body = New-Object System.Windows.Forms.Panel
-    $body.Location = New-Object System.Drawing.Point(0, (Px 54))
-    $body.Size = New-Object System.Drawing.Size($f.Width, ($f.Height - (Px 54) - $footH))
-    $body.BackColor = $UI.Bg
-    $body.AutoScroll = $true
-    $f.Controls.Add($body)
-    $Script:SBody = $body
-
-    # layout cursor in logical (96 DPI) pixels
-    $Script:SY = 2
-    $LX = 24; $CX = 236; $CW = 216; $RowH = 40; $FullW = 428
-
-    function Add-Section([string]$title) {
-        $Script:SBody.Controls.Add((New-Label $title.ToUpper() $LX ($Script:SY + 12) 300 16 $FontCaps $UI.Muted))
-        $Script:SY += 34
-    }
-    function Add-RowLabel([string]$text) {
-        $Script:SBody.Controls.Add((New-Label $text $LX ($Script:SY + 5) 200 22 $FontUI $UI.Text))
-    }
-    function Add-Numeric([string]$label, [double]$min, [double]$max, [double]$val, [int]$decimals = 0, [double]$step = 1) {
-        Add-RowLabel $label
-        $n = New-NumBox $min $max $val $CX $Script:SY $decimals $step
-        $n.Add_ValueChanged({ Preview-Settings })
-        $Script:SBody.Controls.Add($n)
-        $Script:SY += $RowH
-        return $n
-    }
-    function Add-Toggle([string]$label, [bool]$on) {
-        $t = New-Toggle $label $on $LX $Script:SY $FullW
-        $Script:SBody.Controls.Add($t)
-        $Script:SY += 34
-        return $t
-    }
-    function Add-Note([string]$text) {
-        $Script:SBody.Controls.Add((New-Label $text $LX ($Script:SY - 6) 420 18 $FontSmall $UI.Muted))
-        $Script:SY += 16
-    }
-
-    $cfg = $Script:Cfg
-
-    # ================= APPEARANCE =================
-    Add-Section "Theme"
-    $tileW = 66; $i = 0
-    foreach ($name in $Script:Themes.Keys) {
-        $tile = New-ThemeTile $name ($LX + $i * ($tileW + 6.4)) $Script:SY $tileW
-        $body.Controls.Add($tile)
-        $Script:SC.Tiles += $tile
+# Scrolling list of fonts, each shown in its own typeface.
+function New-FontList([int]$x, [int]$y, [int]$w, [int]$h) {
+    $box = New-Object System.Windows.Forms.Panel
+    $box.Location = New-Object System.Drawing.Point((Px $x), (Px $y))
+    $box.Size = New-Object System.Drawing.Size((Px $w), (Px $h))
+    $box.BackColor = $UI.Bg
+    $box.AutoScroll = $true
+    $i = 0
+    foreach ($key in (Get-AvailableFonts)) {
+        $t = New-PaintPanel 0 ($i * 54) ($w - 20) 48
+        $t.Cursor = "Hand"
+        $t.Tag = $key
+        $t.Add_Paint({
+            param($s, $e)
+            $g = Start-Paint $e
+            $k = [string]$s.Tag
+            $sel = ([string]$Script:Cfg.FontFamily -eq $k)
+            Fill-Round $g $(if ($sel) { $UI.Sel } else { $UI.Card }) 0 0 ($s.Width - 1) ($s.Height - 1) (Px 10)
+            if ($sel) { Fill-Round $g $UI.Accent 0 (Px 10) (Px 3) ($s.Height - (Px 20)) (Px 1) }
+            if (-not $Script:TileFonts) { $Script:TileFonts = @{} }
+            if (-not $Script:TileFonts.ContainsKey($k)) {
+                $fam = Get-FontFamilyObj $k
+                $bst = if ($fam.IsStyleAvailable([System.Drawing.FontStyle]::Bold)) { [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular }
+                $Script:TileFonts[$k] = @((New-Object System.Drawing.Font($fam, [single]11)), (New-Object System.Drawing.Font($fam, [single]14, $bst)))
+            }
+            $fs = $Script:TileFonts[$k]
+            Draw-UiText $g $k $fs[0] $UI.Text (New-Object System.Drawing.Rectangle((Px 14), (Px 2), ($s.Width / 2), (Px 26)))
+            $hint = if ($Script:FontCatalog.Contains($k)) { [string]$Script:FontCatalog[$k].Hint } else { "" }
+            Draw-UiText $g $hint $FontSmall $UI.Muted (New-Object System.Drawing.Rectangle((Px 14), (Px 26), ($s.Width / 2), (Px 18)))
+            Draw-UiText $g "01:23:45" $fs[1] $(if ($sel) { $UI.Accent } else { $UI.Text }) (New-Object System.Drawing.Rectangle(($s.Width / 2), 0, ($s.Width / 2 - (Px 12)), $s.Height)) "Right"
+        })
+        $t.Add_Click({
+            param($s, $e)
+            Set-Cfg "FontFamily" ([string]$s.Tag)
+            foreach ($c in $s.Parent.Controls) { $c.Invalidate() }
+        })
+        $box.Controls.Add($t)
         $i++
     }
-    $Script:SY += 62
+    return $box
+}
 
-    Add-Section "Shape"
-    Add-RowLabel "Layout"
-    $Script:SC.Shape = New-DarkCombo @("Wide", "Square") ([string]$cfg.Shape) $CX $Script:SY 120
-    $Script:SC.Shape.Add_SelectedIndexChanged({ Preview-Settings })
-    $body.Controls.Add($Script:SC.Shape)
-    $Script:SY += $RowH
-    $Script:SC.Width  = Add-Numeric "Wide: width (px)"   240 600 $cfg.Width
-    $Script:SC.Square = Add-Numeric "Square: size (px)"  150 280 $cfg.SquareSize
-    $Script:SC.Radius = Add-Numeric "Corner roundness"   0   40  $cfg.CornerRadius
+# ---------------------------------------------------------------------------
+#  Pages. Each returns its title and fills the panel it is given.
+# ---------------------------------------------------------------------------
+function Below($c, [int]$gap = 14) { return [int][Math]::Ceiling($c.Bottom / $Script:Scale) + $gap }
 
-    Add-Section "Colours"
-    $colorFields = @(
-        @{ Key = "BackColor";   Label = "Background" },
-        @{ Key = "TaskColor";   Label = "Task text" },
-        @{ Key = "TimeColor";   Label = "Timer text" },
-        @{ Key = "AccentColor"; Label = "Accent" },
-        @{ Key = "IdleColor";   Label = "Muted" },
-        @{ Key = "ErrorColor";  Label = "Errors" }
-    )
-    $col = 0
-    foreach ($cf in $colorFields) {
-        # two swatches per row
-        $sx = if ($col -eq 0) { $LX } else { $LX + 218 }
-        $body.Controls.Add((New-Label $cf.Label $sx ($Script:SY + 6) 92 20 $FontUI $UI.Text))
-        $btn = New-Object System.Windows.Forms.Button
-        $btn.Location = New-Object System.Drawing.Point((Px ($sx + 96)), (Px $Script:SY))
-        $btn.Size = New-Object System.Drawing.Size((Px 108), (Px 30))
-        $btn.FlatStyle = "Flat"
-        $btn.UseVisualStyleBackColor = $false
-        $btn.FlatAppearance.BorderSize = 1
-        $btn.FlatAppearance.BorderColor = $UI.Line
-        $btn.Font = $FontSmall
-        $btn.Cursor = "Hand"
-        Set-Swatch $btn (ToColor $cfg[$cf.Key])
-        $btn.Add_Click({
-            param($s, $e)
-            $dlg = New-Object System.Windows.Forms.ColorDialog
-            $dlg.Color = $s.BackColor; $dlg.FullOpen = $true
-            if ($dlg.ShowDialog() -eq "OK") {
-                Set-Swatch $s $dlg.Color
-                foreach ($tile in $Script:SC.Tiles) { $tile.Invalidate() }
-                Preview-Settings
-            }
-            $dlg.Dispose()
-        })
-        $body.Controls.Add($btn)
-        $Script:SC.Swatch[$cf.Key] = $btn
-        if ($col -eq 1) { $Script:SY += $RowH; $col = 0 } else { $col = 1 }
+function Add-Hero($p, [string]$title, [string]$sub, [int]$y = 4) {
+    $sz = [System.Windows.Forms.TextRenderer]::MeasureText($title, $FontHero, (New-Object System.Drawing.Size((Px 352), 0)), [System.Windows.Forms.TextFormatFlags]::WordBreak)
+    $th = [int][Math]::Ceiling($sz.Height / $Script:Scale) + 4
+    [void](Add-HubCtrl $p (New-Label $title 24 $y 352 $th $FontHero $UI.Text))
+    $y += $th + 2
+    if ($sub) {
+        $sz2 = [System.Windows.Forms.TextRenderer]::MeasureText($sub, $FontUI, (New-Object System.Drawing.Size((Px 352), 0)), [System.Windows.Forms.TextFormatFlags]::WordBreak)
+        $sh = [int][Math]::Ceiling($sz2.Height / $Script:Scale) + 4
+        [void](Add-HubCtrl $p (New-Label $sub 24 $y 352 $sh $FontUI $UI.Muted))
+        $y += $sh
     }
-    if ($col -eq 1) { $Script:SY += $RowH }
+    return $y + 12
+}
 
-    Add-RowLabel "Background opacity"
-    $trk = New-Object System.Windows.Forms.TrackBar
-    $trk.Minimum = 30; $trk.Maximum = 100; $trk.TickStyle = "None"
-    $trk.Value = [int]$cfg.Opacity
-    $trk.Location = New-Object System.Drawing.Point((Px ($CX - 6)), (Px ($Script:SY + 2)))
-    $trk.Size = New-Object System.Drawing.Size((Px 170), (Px 30))
-    $trk.BackColor = $UI.Bg
-    $body.Controls.Add($trk)
-    $lblOp = New-Label "$($trk.Value)%" ($CX + 168) ($Script:SY + 5) 50 20 $FontUI $UI.Muted
-    $body.Controls.Add($lblOp)
-    $Script:SC.OpLabel = $lblOp
-    $trk.Add_ValueChanged({ $Script:SC.OpLabel.Text = "$($this.Value)%"; Preview-Settings })
-    $Script:SC.Opacity = $trk
-    $Script:SY += $RowH
+function Build-Page-welcome($p) {
+    $y = Add-Hero $p "Let's set up your Everhour widget" "A few quick questions - each answer saves on its own, and you can change anything later."
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 210 @("work", "break", "overbreak", "stopped")))
+    $y += 222
+    $pts = @("Turns red the moment no timer is running", "Warns you when breaks run past your limit", "Hidden from screen sharing, so only you see it")
+    foreach ($t in $pts) {
+        $dot = New-PaintPanel 26 ($y + 7) 8 8
+        $dot.Add_Paint({ param($s, $e) $g = Start-Paint $e; Fill-Circle $g $UI.Accent ($s.Width / 2) ($s.Height / 2) ($s.Width / 2) })
+        [void](Add-HubCtrl $p $dot)
+        [void](Add-HubCtrl $p (New-Label $t 42 $y 330 22 $FontUI $UI.Text))
+        $y += 26
+    }
+    return "Welcome"
+}
 
-    Add-Section "Fonts"
-    $fonts = Get-AvailableFonts
-    Add-RowLabel "Text font"
-    $Script:SC.Font = New-DarkCombo $fonts ([string]$cfg.FontFamily) $CX $Script:SY $CW -FontPreview
-    $Script:SC.Font.Add_SelectedIndexChanged({ Preview-Settings })
-    $body.Controls.Add($Script:SC.Font)
-    $Script:SY += $RowH
-    Add-RowLabel "Timer font"
-    $tsel = if ([string]::IsNullOrWhiteSpace($cfg.TimerFontFamily)) { "Same as text" } else { [string]$cfg.TimerFontFamily }
-    $Script:SC.TimerFont = New-DarkCombo (@("Same as text") + $fonts) $tsel $CX $Script:SY $CW -FontPreview
-    $Script:SC.TimerFont.Add_SelectedIndexChanged({ Preview-Settings })
-    $body.Controls.Add($Script:SC.TimerFont)
-    $Script:SY += $RowH
-    $Script:SC.TimeSize = Add-Numeric "Timer text size"   10  40  $cfg.TimeFontSize
-    $Script:SC.TaskSize = Add-Numeric "Task text size"    7   18  $cfg.TaskFontSize
-    Add-Note "Try Doto for a Nothing-style dot timer, or Inter for an iPhone look."
+function Build-Page-connect($p) {
+    $H = $Script:Hub
+    $y = Add-Hero $p "Connect Everhour" "Copy your personal API token from Everhour and paste it here."
+    [void](Add-HubCtrl $p (New-TutorialStage 24 $y 352 162))
+    $y += 172
+    $kb = New-TextBox 24 ($y + 2) 256 "" "Paste your API token"
+    $kb.UseSystemPasswordChar = $true
+    [void](Add-HubCtrl $p $kb)
+    $H.KeyBox = $kb
+    $bp = New-FlatButton -Text "Paste" -X 288 -Y $y -W 88 -H 30
+    $bp.Add_Click({ try { $c = [System.Windows.Forms.Clipboard]::GetText().Trim(); if ($c) { $Script:Hub.KeyBox.Text = $c } } catch { } })
+    [void](Add-HubCtrl $p $bp)
+    $kb.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) { $e.SuppressKeyPress = $true; Hub-Connect } })
+    $y += 38
+    $H.KeyStatus = New-Label "" 24 $y 352 40 $FontUI $UI.Muted
+    [void](Add-HubCtrl $p $H.KeyStatus)
+    $y += 42
+    if ($H.Mode -ne "setup") {
+        $bc = New-FlatButton -Text "Connect" -X 24 -Y $y -W 352 -H 38 -Primary
+        $bc.Add_Click({ Hub-Connect })
+        [void](Add-HubCtrl $p $bc)
+        $y += 46
+    }
+    [void](Add-HubCtrl $p (New-Label "Stored encrypted on this PC. Only ever sent to api.everhour.com." 24 $y 352 20 $FontSmall $UI.Muted))
+    if ($H.HadKey -or $H.KeyOk) {
+        $who = if ($Script:UserName) { " as $($Script:UserName)" } else { "" }
+        $H.KeyStatus.ForeColor = $UI.Good
+        $H.KeyStatus.Text = "Connected$who. Paste a new token only if you want to change it."
+    } elseif (-not $RenderPreview) {
+        try {
+            $clip = [System.Windows.Forms.Clipboard]::GetText().Trim()
+            if ($clip -match '^[A-Za-z0-9\-_:.]{20,100}$') {
+                $kb.Text = $clip
+                $H.KeyStatus.ForeColor = $UI.Good
+                $H.KeyStatus.Text = "Found a token on your clipboard - press Connect."
+            }
+        } catch { }
+    }
+    return "Connect"
+}
 
-    # ================= FOCUS =================
-    Add-Section "Focus and breaks"
-    $Script:SC.Anim  = Add-Toggle "Smooth animations" ([bool]$cfg.Animations)
-    $Script:SC.Edge  = Add-Toggle "Edge lights (dots round the border)" ([bool]$cfg.EdgeLights)
-    $Script:SC.Red   = Add-Toggle "Turn red when no timer is running" ([bool]$cfg.RedWhenStopped)
-    $Script:SY += 4
-    $Script:SC.BreakMin = Add-Numeric "Break allowance (min/day)" 0 600 $cfg.BreakLimitMinutes
-    Add-RowLabel "Break tasks contain"
-    $Script:SC.BreakWords = New-TextBox $CX $Script:SY $CW ([string]$cfg.BreakKeywords) "break, lunch"
-    $Script:SC.BreakWords.Add_Leave({ Preview-Settings })
-    $body.Controls.Add($Script:SC.BreakWords)
-    $Script:SY += $RowH
-    Add-Note "Tasks with these words count as a break. Over the allowance, the widget turns red."
+function Build-Page-theme($p) {
+    $y = Add-Hero $p "Pick a theme" "The widget behind changes as you tap."
+    $i = 0
+    foreach ($name in $Script:Themes.Keys) {
+        [void](Add-HubCtrl $p (New-ThemeTile $name (24 + ($i % 3) * 120) ($y + [Math]::Floor($i / 3) * 76) 112 68))
+        $i++
+    }
+    $y += 160
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 180 @("work")))
+    return "Theme"
+}
 
-    # ================= WIDGET =================
-    Add-Section "Widget"
-    $Script:SC.Top     = Add-Toggle "Always on top of other windows" ([bool]$cfg.AlwaysOnTop)
-    $Script:SC.Hide    = Add-Toggle "Hide from screen sharing and screenshots" ([bool]$cfg.HideFromCapture)
-    $Script:SC.Seconds = Add-Toggle "Show seconds on the timer" ([bool]$cfg.ShowSeconds)
-    $Script:SC.Today   = Add-Toggle "Show today's total and progress bar" ([bool]$cfg.ShowTodayTotal)
-    $Script:SC.Week    = Add-Toggle "Show this week's total when expanded" ([bool]$cfg.ShowWeekTotal)
-    $Script:SC.Confirm = Add-Toggle "Ask before switching to another task" ([bool]$cfg.ConfirmSwitch)
-    $Script:SC.Auto    = Add-Toggle "Start automatically when Windows starts" (Test-Autostart)
-    $Script:SY += 6
-    $Script:SC.Target   = Add-Numeric "Daily target (hours)"       0  24  $cfg.DailyTargetHours 1 0.5
-    $Script:SC.Refresh  = Add-Numeric "Refresh every (seconds)"    10 300 $cfg.RefreshSeconds
-    $Script:SC.Collapse = Add-Numeric "Auto-collapse after (sec)"  0  300 $cfg.AutoCollapseSeconds
-    Add-Note "0 = never collapse. Target 0 hides the progress bar."
+function Build-Page-shape($p) {
+    $y = Add-Hero $p "Choose a shape" "Large shows today's tasks all the time. Wide and Square open them with a click."
+    [void](Add-HubCtrl $p (New-ShapeTile "Large" "Always open" 24 $y 112 150))
+    [void](Add-HubCtrl $p (New-ShapeTile "Square" "Compact" 144 $y 112 150))
+    [void](Add-HubCtrl $p (New-ShapeTile "Wide" "Slim bar" 264 $y 112 150))
+    $y += 166
+    [void](Add-HubCtrl $p (New-HubToggle "Auto-hide into the screen edge" "AutoHide" 24 $y 352 "Slides away when you're not using it; a dot strip shows the status"))
+    return "Shape"
+}
 
-    # ================= SHORTCUT =================
-    Add-Section "Keyboard shortcut"
-    $Script:SC.HotOn = Add-Toggle "Start / stop the timer from anywhere" ([bool]$cfg.HotkeyEnabled)
-    Add-RowLabel "Shortcut"
-    $hot = New-TextBox $CX $Script:SY $CW ([string]$cfg.Hotkey) "Click, then press keys"
-    $hot.ReadOnly = $true
-    $hot.BackColor = $UI.Card
-    $hot.Cursor = "Hand"
+function Build-Page-font($p) {
+    $y = Add-Hero $p "Pick a font" "Inter looks like an iPhone; Doto is the Nothing-phone dot style."
+    [void](Add-HubCtrl $p (New-FontList 24 $y 352 372))
+    return "Font"
+}
+
+function Build-Page-size($p) {
+    $y = Add-Hero $p "Text size" ""
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Small"; V = "S" }, @{ L = "Medium"; V = "M" }, @{ L = "Large"; V = "L" }) 24 $y 352 { [string]$Script:Cfg.TextSize } { param($v) Set-Cfg "TextSize" $v })
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Caps "Background" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Glass"; V = 60 }, @{ L = "75%"; V = 75 }, @{ L = "90%"; V = 90 }, @{ L = "Solid"; V = 100 }) 24 $y 352 { [int]$Script:Cfg.Opacity } { param($v) Set-Cfg "Opacity" ([int]$v) })
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 200 @("work")))
+    return "Size"
+}
+
+function Build-Page-workday($p) {
+    $H = $Script:Hub
+    $y = Add-Hero $p "Your work hours" "Scroll or drag the wheels. Used for reminders."
+    $hours = 0..23 | ForEach-Object { "{0:D2}" -f $_ }
+    $mins = 0..11 | ForEach-Object { "{0:D2}" -f ($_ * 5) }
+    $ws = Parse-HHmm $Script:Cfg.WorkStart; $we = Parse-HHmm $Script:Cfg.WorkEnd
+    if (-not $ws) { $ws = New-Object TimeSpan(9, 30, 0) }
+    if (-not $we) { $we = New-Object TimeSpan(18, 30, 0) }
+    [void](Add-HubCtrl $p (New-Label "Start" 24 $y 160 20 $FontCaps $UI.Muted))
+    [void](Add-HubCtrl $p (New-Label "End" 216 $y 160 20 $FontCaps $UI.Muted))
+    $y += 22
+    $upd = { Update-WorkHoursFromWheels }
+    $H.WSH = New-Wheel $hours $ws.Hours 24 $y 72 150 $upd;  [void](Add-HubCtrl $p $H.WSH)
+    [void](Add-HubCtrl $p (New-Label ":" 98 ($y + 60) 14 30 $FontHero $UI.Muted))
+    $H.WSM = New-Wheel $mins ([int][Math]::Round($ws.Minutes / 5)) 112 $y 72 150 $upd; [void](Add-HubCtrl $p $H.WSM)
+    $H.WEH = New-Wheel $hours $we.Hours 216 $y 72 150 $upd; [void](Add-HubCtrl $p $H.WEH)
+    [void](Add-HubCtrl $p (New-Label ":" 290 ($y + 60) 14 30 $FontHero $UI.Muted))
+    $H.WEM = New-Wheel $mins ([int][Math]::Round($we.Minutes / 5)) 304 $y 72 150 $upd; [void](Add-HubCtrl $p $H.WEM)
+    $y += 166
+    [void](Add-HubCtrl $p (New-Caps "Work days" 24 $y)); $y += 22
+    $days = @("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun") | ForEach-Object { @{ L = $_; V = $_ } }
+    $ch = Add-HubCtrl $p (New-Chips $days 24 $y 352 { @(([string]$Script:Cfg.WorkDays) -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }) } {
+        param($v)
+        $order = @("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        Set-Cfg "WorkDays" ((@($order | Where-Object { @($v) -contains $_ })) -join ",")
+    } -Multi)
+    $y = Below $ch 18
+    [void](Add-HubCtrl $p (New-HubToggle "Remind me when no timer is running" "IdleNudge" 24 $y))
+    $y += 40
+    [void](Add-HubCtrl $p (New-Chips @(@{ L = "5 min"; V = 5 }, @{ L = "10 min"; V = 10 }, @{ L = "15 min"; V = 15 }) 24 $y 352 { [int]$Script:Cfg.IdleNudgeMinutes } { param($v) Set-Cfg "IdleNudgeMinutes" ([int][Math]::Max(1, [Math]::Min(240, $v))) } "min"))
+    return "Work hours"
+}
+
+function Update-WorkHoursFromWheels {
+    $H = $Script:Hub
+    $s = "{0}:{1}" -f (Get-WheelValue $H.WSH), (Get-WheelValue $H.WSM)
+    $e = "{0}:{1}" -f (Get-WheelValue $H.WEH), (Get-WheelValue $H.WEM)
+    $Script:Cfg.WorkStart = $s; $Script:Cfg.WorkEnd = $e
+    Save-Config
+}
+
+function Build-Page-breaks($p) {
+    $y = Add-Hero $p "Breaks" "Tasks whose name contains these words count as a break. Past your daily allowance, the widget turns red."
+    [void](Add-HubCtrl $p (New-Caps "Break tasks contain" 24 $y)); $y += 22
+    $tb = New-TextBox 24 $y 352 ([string]$Script:Cfg.BreakKeywords) "break, lunch"
+    $tb.Add_Leave({ $Script:Cfg.BreakKeywords = $this.Text.Trim(); Save-Config; Apply-Theme })
+    $tb.Add_TextChanged({ $Script:Cfg.BreakKeywords = $this.Text.Trim() })
+    [void](Add-HubCtrl $p $tb)
+    $y += 40
+    [void](Add-HubCtrl $p (New-Caps "Daily break allowance" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "30 min"; V = 30 }, @{ L = "45 min"; V = 45 }, @{ L = "1 hour"; V = 60 }, @{ L = "90 min"; V = 90 }) 24 $y 352 { [int]$Script:Cfg.BreakLimitMinutes } { param($v) Set-Cfg "BreakLimitMinutes" ([int][Math]::Min(600, $v)) } "min")
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 170 @("break", "overbreak")))
+    return "Breaks"
+}
+
+function Build-Page-target($p) {
+    $y = Add-Hero $p "Daily target" "The bar under the timer fills up towards it."
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "6 h"; V = 6 }, @{ L = "7 h"; V = 7 }, @{ L = "8 h"; V = 8 }, @{ L = "9 h"; V = 9 }) 24 $y 352 { [double]$Script:Cfg.DailyTargetHours } { param($v) Set-Cfg "DailyTargetHours" ([double][Math]::Min(24, $v)) } "h")
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-HubToggle "Start automatically when Windows starts" "_autostart" 24 $y)); $y += 40
+    [void](Add-HubCtrl $p (New-HubToggle "Hide from screen sharing and screenshots" "HideFromCapture" 24 $y)); $y += 40
+    [void](Add-HubCtrl $p (New-HubToggle "Turn red when no timer is running" "RedWhenStopped" 24 $y)); $y += 40
+    return "Daily target"
+}
+
+function Build-Page-finish($p) {
+    $y = Add-Hero $p "You're all set" "Here's how it works:"
+    $tips = @(
+        @("Round button", "start / stop (resumes last task)"),
+        @("Click the widget", "today's time, task by task"),
+        @("Right-click", "start a task, settings, exit"),
+        @($Script:Cfg.Hotkey, "start or stop from anywhere"))
+    foreach ($t in $tips) {
+        [void](Add-HubCtrl $p (New-Label $t[0] 24 $y 126 22 $FontUIBold $UI.Text))
+        [void](Add-HubCtrl $p (New-Label $t[1] 152 $y 228 22 $FontUI $UI.Muted))
+        $y += 28
+    }
+    $y += 14
+    $b = New-FlatButton -Text "Start tracking" -X 24 -Y $y -W 352 -H 48 -Primary
+    $b.Font = $FontTitle
+    $b.Add_Click({ $Script:Hub.Done = $true; $Script:Hub.Form.Close() })
+    [void](Add-HubCtrl $p $b)
+    $y += 60
+    [void](Add-HubCtrl $p (New-PreviewStage 24 $y 352 150 @("work")))
+    return "Done"
+}
+
+function Build-Page-home($p) {
+    $H = $Script:Hub
+    $y = 4
+    [void](Add-HubCtrl $p (New-Caps "Look" 24 $y)); $y += 22
+    [void](Add-HubCtrl $p (New-NavRow "Theme" { Get-CurrentThemeName } "theme" 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-NavRow "Shape" { [string]$Script:Cfg.Shape } "shape" 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-NavRow "Font" { [string]$Script:Cfg.FontFamily } "font" 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-Label "Text size" 24 ($y + 7) 110 20 $FontUI $UI.Text))
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "S"; V = "S" }, @{ L = "M"; V = "M" }, @{ L = "L"; V = "L" }) 150 $y 226 { [string]$Script:Cfg.TextSize } { param($v) Set-Cfg "TextSize" $v })
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Label "Background" 24 ($y + 7) 110 20 $FontUI $UI.Text))
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Glass"; V = 60 }, @{ L = "75%"; V = 75 }, @{ L = "90%"; V = 90 }, @{ L = "Solid"; V = 100 }) 150 $y 226 { [int]$Script:Cfg.Opacity } { param($v) Set-Cfg "Opacity" ([int]$v) })
+    $y = Below $ch
+
+    [void](Add-HubCtrl $p (New-Caps "Widget" 24 $y)); $y += 22
+    foreach ($t in @(@("Always on top of other windows", "AlwaysOnTop"), @("Hide from screen sharing", "HideFromCapture"),
+                     @("Auto-hide into the screen edge", "AutoHide"), @("Show seconds", "ShowSeconds"),
+                     @("Show today's progress", "ShowTodayTotal"), @("Ask before switching tasks", "ConfirmSwitch"),
+                     @("Start with Windows", "_autostart"))) {
+        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
+    }
+    $y += 8
+    [void](Add-HubCtrl $p (New-Caps "Focus" 24 $y)); $y += 22
+    foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
+        [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 38
+    }
+    [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min  |  {1}" -f $Script:Cfg.BreakLimitMinutes, $Script:Cfg.BreakKeywords } "breaks" 24 $y)); $y += 60
+
+    [void](Add-HubCtrl $p (New-Caps "Reminders" 24 $y)); $y += 22
+    [void](Add-HubCtrl $p (New-NavRow "Work hours" { "{0}-{1}  |  {2}" -f $Script:Cfg.WorkStart, $Script:Cfg.WorkEnd, (Format-Days $Script:Cfg.WorkDays) } "workday" 24 $y)); $y += 60
+
+    [void](Add-HubCtrl $p (New-Caps "Advanced" 24 $y)); $y += 22
+    [void](Add-HubCtrl $p (New-NavRow "Target, refresh, shortcut" { "{0:0.#} h day" -f [double]$Script:Cfg.DailyTargetHours } "advanced" 24 $y)); $y += 60
+
+    [void](Add-HubCtrl $p (New-Caps "Account" 24 $y)); $y += 22
+    $who = if ($Script:LastError -eq "AUTH") { "Your API token was rejected" } elseif ($Script:UserName) { "Connected as $($Script:UserName)" } else { "Connected" }
+    $H.AcctLabel = New-Label $who 24 $y 352 22 $FontUI $(if ($Script:LastError -eq "AUTH") { $UI.Danger } else { $UI.Text })
+    [void](Add-HubCtrl $p $H.AcctLabel); $y += 28
+    [void](Add-HubCtrl $p (New-NavRow "Change API token" $null "connect" 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-ActionRow "Test connection" { Hub-TestConnection } 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-ActionRow "Run the setup guide again" { $Script:Hub.RunSetup = $true; $Script:Hub.Form.Close() } 24 $y)); $y += 52
+    [void](Add-HubCtrl $p (New-ActionRow "Open log folder" { Start-Process explorer.exe $ConfigDir } 24 $y)); $y += 56
+    [void](Add-HubCtrl $p (New-Label "Everhour Widget v$($Script:Version). Changes save automatically." 24 $y 352 20 $FontSmall $UI.Muted))
+    $y += 30
+    $sp = New-PaintPanel 0 $y 1 1; [void](Add-HubCtrl $p $sp)
+    return "Settings"
+}
+
+function Build-Page-advanced($p) {
+    $y = 4
+    [void](Add-HubCtrl $p (New-Caps "Daily target" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "6 h"; V = 6 }, @{ L = "7 h"; V = 7 }, @{ L = "8 h"; V = 8 }, @{ L = "9 h"; V = 9 }) 24 $y 352 { [double]$Script:Cfg.DailyTargetHours } { param($v) Set-Cfg "DailyTargetHours" ([double][Math]::Min(24, $v)) } "h")
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Caps "Check Everhour every" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "10 s"; V = 10 }, @{ L = "20 s"; V = 20 }, @{ L = "30 s"; V = 30 }, @{ L = "1 min"; V = 60 }) 24 $y 352 { [int]$Script:Cfg.RefreshSeconds } { param($v) Set-Cfg "RefreshSeconds" ([int]$v) })
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Caps "Close the expanded view after" 24 $y)); $y += 22
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Never"; V = 0 }, @{ L = "10 s"; V = 10 }, @{ L = "15 s"; V = 15 }, @{ L = "30 s"; V = 30 }) 24 $y 352 { [int]$Script:Cfg.AutoCollapseSeconds } { param($v) Set-Cfg "AutoCollapseSeconds" ([int]$v) })
+    $y = Below $ch
+    [void](Add-HubCtrl $p (New-Caps "Keyboard shortcut" 24 $y)); $y += 22
+    [void](Add-HubCtrl $p (New-HubToggle "Start / stop from anywhere" "HotkeyEnabled" 24 $y 352 "Press it in any app - even when the widget is hidden")); $y += 54
+    $hot = New-TextBox 24 $y 352 ([string]$Script:Cfg.Hotkey) "Click here, then press your keys"
+    $hot.ReadOnly = $true; $hot.BackColor = $UI.Card; $hot.Cursor = "Hand"
     $hot.Add_KeyDown({
         param($s, $e)
         $e.SuppressKeyPress = $true; $e.Handled = $true
         $k = $e.KeyCode.ToString()
-        if ($k -in @("ControlKey", "ShiftKey", "Menu", "LWin", "RWin")) { return }
-        if ($k -eq "Back" -or $k -eq "Delete" -or $k -eq "Escape") { return }
+        if ($k -in @("ControlKey", "ShiftKey", "Menu", "LWin", "RWin", "Back", "Delete", "Escape")) { return }
         $parts = @()
         if ($e.Control) { $parts += "Ctrl" }
         if ($e.Alt) { $parts += "Alt" }
         if ($e.Shift) { $parts += "Shift" }
-        if ($parts.Count -eq 0) { $Script:SC.Status.ForeColor = $UI.Muted; $Script:SC.Status.Text = "Add Ctrl, Alt or Shift"; return }
+        if ($parts.Count -eq 0) { return }
         $s.Text = (($parts + $k) -join "+")
+        $Script:Cfg.Hotkey = $s.Text; Save-Config; Register-Hotkey
+        $Script:Hub.HotNote.Text = if ($Script:HotkeyStatus) { $Script:HotkeyStatus } else { "Saved - try it now." }
     })
-    $body.Controls.Add($hot)
-    $Script:SC.Hot = $hot
-    $Script:SY += $RowH
-    $hk = if ($Script:HotkeyStatus) { $Script:HotkeyStatus } else { "Click the box and press the keys you want." }
-    Add-Note $hk
-
-    # ================= REMINDERS =================
-    Add-Section "Reminders"
-    $Script:SC.Nudge = Add-Toggle "Remind me when no timer is running in work hours" ([bool]$cfg.IdleNudge)
-    $Script:SY += 4
-    $Script:SC.NudgeMin = Add-Numeric "Remind after (minutes idle)" 5 240 $cfg.IdleNudgeMinutes
-
-    $slots = @()
-    for ($m = 0; $m -lt 24 * 60; $m += 15) { $slots += ("{0:D2}:{1:D2}" -f [int][Math]::Floor($m / 60), ($m % 60)) }
-    function Get-Slot([string]$v) {
-        $ts = Parse-HHmm $v
-        if (-not $ts) { return "09:30" }
-        $mins = [int]([Math]::Round($ts.TotalMinutes / 15) * 15) % (24 * 60)
-        return ("{0:D2}:{1:D2}" -f [int][Math]::Floor($mins / 60), ($mins % 60))
-    }
-    Add-RowLabel "Work hours"
-    $Script:SC.WStart = New-DarkCombo $slots (Get-Slot $cfg.WorkStart) $CX $Script:SY 90
-    $body.Controls.Add($Script:SC.WStart)
-    $body.Controls.Add((New-Label "to" ($CX + 96) ($Script:SY + 5) 22 20 $FontUI $UI.Muted))
-    $Script:SC.WEnd = New-DarkCombo $slots (Get-Slot $cfg.WorkEnd) ($CX + 122) $Script:SY 90
-    $body.Controls.Add($Script:SC.WEnd)
-    $Script:SY += $RowH
-
-    Add-RowLabel "Work days"
-    $Script:SY += 30
-    $dayKeys = @("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-    $on = @(([string]$cfg.WorkDays) -split "," | ForEach-Object { $_.Trim() })
-    for ($i = 0; $i -lt 7; $i++) {
-        $chipD = New-DayChip $dayKeys[$i] ($on -contains $dayKeys[$i]) ($LX + $i * 46) $Script:SY
-        $chipD.Tag.Key = $dayKeys[$i]
-        $body.Controls.Add($chipD)
-        $Script:SC.Days += $chipD
-    }
-    $Script:SY += 42
-
-    # ================= ACCOUNT =================
-    Add-Section "Account"
-    $acct = if ($Script:UserName) { "Connected as $($Script:UserName)" } else { "Connected" }
-    if ($Script:LastError -eq "AUTH") { $acct = "Your API token was rejected" }
-    $Script:SC.Account = New-Label $acct $LX $Script:SY 420 22 $FontUI $(if ($Script:LastError -eq "AUTH") { $UI.Danger } else { $UI.Text })
-    $body.Controls.Add($Script:SC.Account)
-    $Script:SY += 28
-    $btnKey = New-FlatButton -Text "Change API token" -X $LX -Y $Script:SY -W 140 -H 32
-    $btnTest = New-FlatButton -Text "Test connection" -X ($LX + 148) -Y $Script:SY -W 140 -H 32
-    $btnGuide = New-FlatButton -Text "Setup guide" -X ($LX + 296) -Y $Script:SY -W 132 -H 32 -Ghost
-    foreach ($b in @($btnKey, $btnTest, $btnGuide)) { $body.Controls.Add($b) }
-    $btnKey.Add_Click({
-        if (Change-ApiKey) {
-            $Script:SC.Account.ForeColor = $UI.Text
-            $Script:SC.Account.Text = if ($Script:UserName) { "Connected as $($Script:UserName)" } else { "Token saved" }
-        }
-    })
-    $btnTest.Add_Click({
-        $Script:SC.Account.ForeColor = $UI.Muted
-        $Script:SC.Account.Text = "Checking..."
-        Invoke-Api -Requests @(@{ Name = "me"; Path = "/users/me" }) -OnDone {
-            param($m)
-            $lbl = $Script:SC.Account
-            if (-not $lbl -or $lbl.IsDisposed) { return }
-            $r = $m["me"]
-            if ($r -and $r.Ok) {
-                $Script:UserName = [string]$r.Data.name
-                $lbl.ForeColor = $UI.Good; $lbl.Text = "Working - connected as $($Script:UserName)"
-            } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
-                $lbl.ForeColor = $UI.Danger; $lbl.Text = "Everhour rejected the token"
-            } else {
-                $lbl.ForeColor = $UI.Danger; $lbl.Text = "Can't reach Everhour - check your internet"
-            }
-        }
-    })
-    $btnGuide.Add_Click({ $Script:RunGuideAfter = $true; $this.FindForm().Close() })
-    $Script:SY += 44
-    $btnLog = New-FlatButton -Text "Open log folder" -X $LX -Y $Script:SY -W 140 -H 30 -Ghost
-    $btnLog.Add_Click({ Start-Process explorer.exe $ConfigDir })
-    $body.Controls.Add($btnLog)
-    $Script:SY += 40
-    $body.Controls.Add((New-Label "Everhour Widget v$($Script:Version) - your token is stored encrypted for your Windows user." $LX $Script:SY 428 18 $FontSmall $UI.Muted))
-    $Script:SY += 30
-    $spacer = New-Object System.Windows.Forms.Panel
-    $spacer.Location = New-Object System.Drawing.Point(0, (Px $Script:SY)); $spacer.Size = New-Object System.Drawing.Size(1, 1)
-    $body.Controls.Add($spacer)
-
-    # ---- actions ----
-    $btnSave.Add_Click({
-        Read-SettingsControls
-        if ($Script:Cfg.HotkeyEnabled -and -not (Parse-Hotkey $Script:Cfg.Hotkey)) {
-            $Script:SC.Status.ForeColor = $UI.Danger
-            $Script:SC.Status.Text = "That shortcut isn't valid"
-            return
-        }
-        Save-Config
-        if ($Script:SC.Auto.Tag.On) { Install-Autostart | Out-Null } else { Remove-Autostart }
-        Register-Hotkey
-        Apply-Theme
-        $Script:SettingsSaved = $true
-        $this.FindForm().Close()
-    })
-    $btnCancel.Add_Click({ $this.FindForm().Close() })
-    $btnReset.Add_Click({
-        if (-not (Show-Message "Reset settings?" "Colours, sizes and behaviour go back to the defaults. Your API token and the widget's position are kept." "Reset" "Cancel")) { return }
-        foreach ($k in $Script:Defaults.Keys) {
-            if ($k -notin @("ApiKey", "ApiKeyProtected", "PosX", "PosY", "LastTaskId", "LastTaskName", "LastStopAt", "OnboardingDone")) { $Script:Cfg[$k] = $Script:Defaults[$k] }
-        }
-        Save-Config
-        Register-Hotkey
-        Apply-Theme
-        $Script:SettingsSaved = $true
-        $this.FindForm().Close()
-    })
-    $f.Add_FormClosing({
-        if (-not $Script:SettingsSaved) {
-            # put the preview back, but keep a key changed while the dialog was open
-            foreach ($k in $Script:CfgSnap.Keys) {
-                if ($k -notin @("ApiKey", "ApiKeyProtected", "PosX", "PosY", "LastTaskId", "LastTaskName", "LastStopAt")) { $Script:Cfg[$k] = $Script:CfgSnap[$k] }
-            }
-            Save-Config
-            $Script:Anchor = $null; Place-Form
-            Apply-Theme
-        }
-    })
-
-    $Script:SettingsLive = $true
-    try { [void]$f.ShowDialog() } finally {
-        $Script:SettingsLive = $false
-        $Script:SettingsOpen = $false
-        $f.Dispose()
-    }
-    if ($Script:RunGuideAfter) { Show-Onboarding | Out-Null }
+    [void](Add-HubCtrl $p $hot); $y += 34
+    $msg = if ($Script:HotkeyStatus) { $Script:HotkeyStatus } else { "Click the box and press the keys you want, e.g. Ctrl+Alt+E." }
+    $Script:Hub.HotNote = New-Label $msg 24 $y 352 36 $FontSmall $UI.Muted
+    [void](Add-HubCtrl $p $Script:Hub.HotNote)
+    return "Advanced"
 }
+
+# ---------------------------------------------------------------------------
+#  Hub window and navigation
+# ---------------------------------------------------------------------------
+function Get-HubTime {
+    if ($RenderPreview) { return 3.6 }
+    return $Script:Hub.Clock.Elapsed.TotalSeconds
+}
+
+function Show-Hub([string]$Mode = "settings", [string]$Page = "") {
+    if ($Script:HubOpen) { return $false }
+    $Script:HubOpen = $true
+    $setup = ($Mode -eq "setup")
+    $H = @{ Mode = $Mode; Stack = (New-Object System.Collections.ArrayList); Clock = [Diagnostics.Stopwatch]::StartNew()
+            Wheels = @(); Stages = @(); HadKey = -not [string]::IsNullOrWhiteSpace((Get-ApiKey)); KeyOk = $false; Busy = $false
+            Done = $false; RunSetup = $false; Current = $null; Old = $null; Slide = $null; PageName = "" }
+    if ($RenderPreview) { $H.HadKey = $true }
+    $Script:Hub = $H
+
+    $W = $Script:HubW; $Hh = 660
+    $footH = if ($setup) { 72 } else { 0 }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Everhour Widget"
+    $f.FormBorderStyle = "None"; $f.StartPosition = "Manual"
+    $f.BackColor = $UI.Bg; $f.ShowInTaskbar = $setup; $f.TopMost = $true; $f.KeyPreview = $true
+    $an = if ($Script:Anchor) { $Script:Anchor } else { [System.Windows.Forms.Cursor]::Position }
+    $wa = [System.Windows.Forms.Screen]::FromPoint($an).WorkingArea
+    $fw = Px $W; $fh = [Math]::Min((Px $Hh), $wa.Height - (Px 20))
+    $f.Size = New-Object System.Drawing.Size($fw, $fh)
+    if ($setup -or -not $Script:Anchor) {
+        $fx = $wa.Left + [int](($wa.Width - $fw) / 2); $fy = $wa.Top + [int](($wa.Height - $fh) / 2)
+    } else {
+        # open beside the widget, on whichever side has room
+        $fx = $form.Left - $fw - (Px 4)
+        if ($fx -lt $wa.Left) { $fx = $form.Right + (Px 4) }
+        $fx = [Math]::Max($wa.Left, [Math]::Min($fx, $wa.Right - $fw))
+        $fy = [Math]::Max($wa.Top, [Math]::Min($form.Top, $wa.Bottom - $fh))
+    }
+    $f.Location = New-Object System.Drawing.Point($fx, $fy)
+    $H.Form = $f
+
+    # header: back, title, close
+    $bar = New-PaintPanel 0 0 $W 58
+    $f.Controls.Add($bar)
+    $back = New-Label ([string][char]0x2039) 10 8 34 40 (New-Object System.Drawing.Font("Segoe UI", 20)) $UI.Text
+    $back.TextAlign = "MiddleCenter"; $back.Cursor = "Hand"
+    $back.Add_Click({ Hub-Back })
+    $bar.Controls.Add($back); $H.BackBtn = $back
+    $H.TitleLbl = New-Label "" 46 16 260 28 $FontTitle $UI.Text
+    $bar.Controls.Add($H.TitleLbl)
+    $x = New-Label ([string][char]0x2715) ($W - 46) 13 32 30 (New-Object System.Drawing.Font("Segoe UI", 10.5)) $UI.Muted
+    $x.TextAlign = "MiddleCenter"; $x.Cursor = "Hand"
+    $x.Add_Click({ $Script:Hub.Form.Close() })
+    $bar.Controls.Add($x)
+    Enable-Drag $bar; Enable-Drag $H.TitleLbl
+
+    $vp = New-Object System.Windows.Forms.Panel
+    $vp.Location = New-Object System.Drawing.Point(0, (Px 58))
+    $vp.Size = New-Object System.Drawing.Size($fw, ($fh - (Px 58) - (Px $footH)))
+    $vp.BackColor = $UI.Bg
+    $f.Controls.Add($vp)
+    $H.View = $vp
+
+    if ($setup) {
+        $dots = New-PaintPanel 24 0 160 16
+        $dots.Top = $fh - (Px 46)
+        $dots.Add_Paint({
+            param($s, $e)
+            $g = Start-Paint $e
+            $n = $Script:SetupPages.Count
+            $cur = [array]::IndexOf($Script:SetupPages, $Script:Hub.PageName)
+            $x = 0.0
+            for ($i = 0; $i -lt $n; $i++) {
+                $w = if ($i -eq $cur) { Px 18 } else { Px 6 }
+                Fill-Round $g $(if ($i -le $cur) { $UI.Accent } else { $UI.Line }) $x (Px 5) $w (Px 6) (Px 3)
+                $x += $w + (Px 5)
+            }
+        })
+        $f.Controls.Add($dots); $H.Dots = $dots
+        $H.Next = New-FlatButton -Text "Next" -X ($W - 140) -Y 0 -W 116 -H 40 -Primary
+        $H.Next.Top = $fh - (Px 58)
+        $H.Next.Add_Click({ Hub-Next })
+        $f.Controls.Add($H.Next)
+    }
+
+    # one clock for slides, wheels, previews and the fade-in
+    $tick = New-Object System.Windows.Forms.Timer
+    $tick.Interval = 16
+    $tick.Add_Tick({ Hub-Tick })
+    $H.Tick = $tick
+    $H.Frame = 0
+
+    $f.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $s.Close() } })
+    $f.Add_Shown({
+        param($s, $e)
+        Set-DwmLook $s; Set-CaptureHidden $s
+        $s.Activate()
+        $Script:Hub.Tick.Start()
+    })
+    $f.Add_Paint({ param($s, $e) if (-not $Script:DwmRounded) { $pn = New-Object System.Drawing.Pen($UI.Line); $e.Graphics.DrawRectangle($pn, 0, 0, $s.Width - 1, $s.Height - 1); $pn.Dispose() } })
+
+    $first = if ($setup) { "welcome" } elseif ($Page) { $Page } else { "home" }
+    if (-not $setup -and $Page -and $Page -ne "home") { [void]$H.Stack.Add("home") }
+    Hub-Go $first 1 -NoAnim
+    if (-not $RenderPreview) { $f.Opacity = 0 }
+    try { [void]$f.ShowDialog() } finally {
+        $tick.Stop(); $tick.Dispose()
+        $f.Dispose()
+        $Script:HubOpen = $false
+    }
+
+    $haveKey = -not [string]::IsNullOrWhiteSpace((Get-ApiKey))
+    if ($setup -and $haveKey) { $Script:Cfg.OnboardingDone = $true; Save-Config }
+    if ($H.RunSetup) { return (Show-Hub "setup") }
+    if ($setup -and $H.Done -and -not $Script:IsRunning -and $Script:Ready) { Show-TaskPicker }
+    return $haveKey
+}
+
+function Hub-Go([string]$page, [int]$dir = 1, [switch]$NoAnim, [switch]$Push) {
+    $H = $Script:Hub
+    if ($H.Slide) { Finish-Slide }
+    if ($Push -and $H.PageName) { [void]$H.Stack.Add($H.PageName) }
+    $vp = $H.View
+    $p = New-Object System.Windows.Forms.Panel
+    $p.Size = $vp.ClientSize
+    $p.BackColor = $UI.Bg
+    $p.AutoScroll = $true
+    Set-DoubleBuffered $p
+    $title = & "Build-Page-$page" $p
+    $H.PageName = $page
+    $H.TitleLbl.Text = $(if ($H.Mode -eq "setup" -and $page -ne "home") { "Set up" } else { [string]$title })
+    $setupIdx = [array]::IndexOf($Script:SetupPages, $page)
+    $H.BackBtn.Visible = $(if ($H.Mode -eq "setup") { $setupIdx -gt 0 } else { $H.Stack.Count -gt 0 })
+    if ($H.Next) {
+        $H.Next.Visible = ($page -ne "finish")
+        $H.Next.Text = switch ($page) { "welcome" { "Get started" } "connect" { if ($H.HadKey -or $H.KeyOk) { "Next" } else { "Connect" } } default { "Next" } }
+        $H.Dots.Invalidate()
+    }
+    if ($NoAnim -or -not $H.Current) {
+        if ($H.Current) { $vp.Controls.Remove($H.Current); $H.Current.Dispose() }
+        $p.Location = New-Object System.Drawing.Point(0, 0)
+        $vp.Controls.Add($p)
+        $H.Current = $p
+    } else {
+        $p.Location = New-Object System.Drawing.Point(($dir * $vp.Width), 0)
+        $vp.Controls.Add($p)
+        $H.Slide = @{ Old = $H.Current; New = $p; Dir = $dir; T0 = $H.Clock.Elapsed.TotalSeconds }
+        $H.Current = $p
+    }
+    if ($page -eq "connect" -and $H.KeyBox) { $H.KeyBox.Focus() | Out-Null }
+}
+
+function Finish-Slide {
+    $H = $Script:Hub; $sl = $H.Slide
+    if (-not $sl) { return }
+    $sl.New.Left = 0
+    $H.View.Controls.Remove($sl.Old); $sl.Old.Dispose()
+    $H.Slide = $null
+    $H.Wheels = @($H.Wheels | Where-Object { -not $_.IsDisposed })
+    $H.Stages = @($H.Stages | Where-Object { -not $_.IsDisposed })
+}
+
+function Hub-Tick {
+    $H = $Script:Hub
+    if (-not $H -or $H.Form.IsDisposed) { return }
+    if ($H.Form.Opacity -lt 1) { $H.Form.Opacity = [Math]::Min(1.0, $H.Form.Opacity + 0.14) }
+    if ($H.Slide) {
+        $p = ($H.Clock.Elapsed.TotalSeconds - $H.Slide.T0) / 0.26
+        if ($p -ge 1) { Finish-Slide }
+        else {
+            $e = 1 - [Math]::Pow(1 - $p, 3)      # ease-out
+            $w = $H.View.Width
+            $H.Slide.New.Left = [int]($H.Slide.Dir * $w * (1 - $e))
+            $H.Slide.Old.Left = [int](-$H.Slide.Dir * $w * $e)
+        }
+    }
+    foreach ($wh in $H.Wheels) {
+        if ($wh.IsDisposed -or $wh.Tag.Drag) { continue }
+        $d = $wh.Tag.Idx - $wh.Tag.Off
+        if ([Math]::Abs($d) -gt 0.002) { $wh.Tag.Off += $d * 0.28; $wh.Invalidate() }
+    }
+    $H.Frame++
+    if ($H.Frame % 3 -eq 0) { foreach ($st in $H.Stages) { if (-not $st.IsDisposed -and $st.Visible) { $st.Invalidate() } } }
+}
+
+function Hub-Back {
+    $H = $Script:Hub
+    if ($H.Mode -eq "setup") {
+        $i = [array]::IndexOf($Script:SetupPages, $H.PageName)
+        if ($i -gt 0) { Hub-Go $Script:SetupPages[$i - 1] -1 }
+    } elseif ($H.Stack.Count -gt 0) {
+        $prev = $H.Stack[$H.Stack.Count - 1]
+        $H.Stack.RemoveAt($H.Stack.Count - 1)
+        Hub-Go $prev -1
+    }
+}
+
+function Hub-Next {
+    $H = $Script:Hub
+    $i = [array]::IndexOf($Script:SetupPages, $H.PageName)
+    if ($H.PageName -eq "connect" -and -not ($H.HadKey -or $H.KeyOk)) { Hub-Connect; return }
+    if ($H.PageName -eq "connect" -and $H.KeyBox -and $H.KeyBox.Text.Trim()) { Hub-Connect; return }
+    if ($i -ge 0 -and $i -lt $Script:SetupPages.Count - 1) { Hub-Go $Script:SetupPages[$i + 1] 1 }
+}
+
+function Hub-Connect {
+    $H = $Script:Hub
+    $k = $H.KeyBox.Text.Trim()
+    if (-not $k) {
+        if ($H.HadKey -or $H.KeyOk) { if ($H.Mode -eq "setup") { Hub-Go "theme" 1 }; return }
+        $H.KeyStatus.ForeColor = $UI.Danger; $H.KeyStatus.Text = "Paste your API token first."
+        return
+    }
+    if ($H.Busy) { return }
+    $H.Busy = $true
+    $H.KeyStatus.ForeColor = $UI.Muted; $H.KeyStatus.Text = "Checking with Everhour..."
+    Invoke-Api -Key $k -Requests @(@{ Name = "me"; Path = "/users/me" }) -OnDone {
+        param($m)
+        $H = $Script:Hub
+        $H.Busy = $false
+        if ($H.Form.IsDisposed -or -not $H.KeyBox -or $H.KeyBox.IsDisposed) { return }
+        $r = $m["me"]
+        $k = $H.KeyBox.Text.Trim()
+        $ok = $false
+        if ($r -and $r.Ok -and $r.Data) {
+            $Script:UserId = $r.Data.id
+            $Script:UserName = [string]$r.Data.name
+            $ok = $true
+        } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
+            $H.KeyStatus.ForeColor = $UI.Danger
+            $H.KeyStatus.Text = "Everhour didn't accept that token. Copy it again and make sure you got all of it."
+        } else {
+            $ok = $true     # offline: keep it; the widget will say if it's wrong
+        }
+        if ($ok) {
+            Set-ApiKey $k; $H.KeyOk = $true
+            if ($Script:Ready) { After-KeyChanged }
+            $H.KeyBox.Text = ""
+            $who = if ($Script:UserName) { " as $($Script:UserName)" } else { "" }
+            $H.KeyStatus.ForeColor = $UI.Good; $H.KeyStatus.Text = "Connected$who."
+            if ($H.Mode -eq "setup") { Hub-Go "theme" 1 }
+        }
+    }
+}
+
+function Hub-TestConnection {
+    $Script:Hub.AcctLabel.ForeColor = $UI.Muted
+    $Script:Hub.AcctLabel.Text = "Checking..."
+    Invoke-Api -Requests @(@{ Name = "me"; Path = "/users/me" }) -OnDone {
+        param($m)
+        $lbl = $Script:Hub.AcctLabel
+        if (-not $lbl -or $lbl.IsDisposed) { return }
+        $r = $m["me"]
+        if ($r -and $r.Ok) {
+            $Script:UserName = [string]$r.Data.name
+            $lbl.ForeColor = $UI.Good; $lbl.Text = "Working - connected as $($Script:UserName)"
+        } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
+            $lbl.ForeColor = $UI.Danger; $lbl.Text = "Everhour rejected the token"
+        } else {
+            $lbl.ForeColor = $UI.Danger; $lbl.Text = "Can't reach Everhour - check your internet"
+        }
+    }
+}
+
+function Show-Settings { Show-Hub "settings" | Out-Null }
 
 # ===========================================================================
 #  TASK PICKER
@@ -3338,292 +3879,6 @@ function Build-DemoFrame([string]$mode, [double]$t) {
     }
 }
 
-function Get-GuideTime {
-    if ($RenderPreview) { return @(0, 3.6, 4.3, 3.6, 0, 0, 0)[$Script:OB.Step] + 0.0 }
-    return $Script:OB.Clock.Elapsed.TotalSeconds
-}
-
-function Draw-GuideStage($g, [int]$step) {
-    $t = Get-GuideTime
-    switch ($step) {
-        1 { Draw-SceneProfile $g $t }
-        2 { Draw-SceneToken $g $t }
-        3 { Draw-ScenePaste $g $t }
-        default {
-            Fill-Round $g (ToColor "#121215") 0 0 512 236 12
-            $modes = @("work", "break", "overbreak", "stopped")
-            $names = @("Working", "On a break", "Break over the limit", "Timer off")
-            $idx = if ($step -eq 4) { 0 } else { [int][Math]::Floor($t / 3.5) % 4 }
-            if ($RenderPreview -and $step -eq 0) { $idx = 0 }
-            if ($RenderPreview -and $step -eq 5) { $idx = 1 }
-            if ($RenderPreview -and $step -eq 6) { $idx = 3 }
-            if ($step -eq 5 -and -not $RenderPreview) { $idx = 1 + [int][Math]::Floor($t / 3.5) % 3 }
-            $bmp = Build-DemoFrame $modes[$idx] $t
-            $state = $g.Save()
-            $g.ResetTransform()
-            $sx = [int]((Px 512) - $bmp.Width) / 2; $sy = [int]((Px 206) - $bmp.Height) / 2
-            $g.DrawImage($bmp, $sx, $sy, $bmp.Width, $bmp.Height)
-            $g.Restore($state)
-            $bmp.Dispose()
-            Draw-Text $g $names[$idx] (Get-SceneFont 11 -Bold) (ToColor "#8B8B96") 0 206 512 24 "Center"
-        }
-    }
-}
-
-function Show-Onboarding {
-    if ($Script:GuideOpen) { return $false }
-    $Script:GuideOpen = $true
-    $hadKey = -not [string]::IsNullOrWhiteSpace((Get-ApiKey))
-    $Script:OB = @{ Step = 0; Clock = [Diagnostics.Stopwatch]::StartNew(); Done = $false; Busy = $false; Groups = @{}; HadKey = $hadKey }
-    $d = New-Dialog "Set up your widget" 560 652
-    $f = $d.Form
-    $ob = $Script:OB
-    $ob.Form = $f
-
-    $stage = New-Object System.Windows.Forms.Panel
-    $stage.Location = New-Object System.Drawing.Point((Px 24), (Px 56))
-    $stage.Size = New-Object System.Drawing.Size((Px 512), (Px 236))
-    $stage.BackColor = $UI.Bg
-    Set-DoubleBuffered $stage
-    $stage.Add_Paint({
-        param($s, $e)
-        $g = $e.Graphics
-        $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
-        $g.ScaleTransform([single]$Script:Scale, [single]$Script:Scale)
-        try { Draw-GuideStage $g $Script:OB.Step } catch { Write-Log "Guide draw failed: $($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)" }
-    })
-    $f.Controls.Add($stage)
-    $ob.Stage = $stage
-
-    $ob.Title = New-Label "" 24 304 512 30 $FontHero $UI.Text
-    $ob.Body = New-Label "" 24 338 512 46 $FontUI $UI.Muted
-    $f.Controls.Add($ob.Title); $f.Controls.Add($ob.Body)
-
-    $content = New-Object System.Windows.Forms.Panel
-    $content.Location = New-Object System.Drawing.Point((Px 24), (Px 390))
-    $content.Size = New-Object System.Drawing.Size((Px 512), (Px 186))
-    $content.BackColor = $UI.Bg
-    $f.Controls.Add($content)
-    $ob.Content = $content
-
-    function Add-To([int]$step, $ctrl) {
-        if (-not $Script:OB.Groups.ContainsKey($step)) { $Script:OB.Groups[$step] = @() }
-        $Script:OB.Groups[$step] += $ctrl
-        $Script:OB.Content.Controls.Add($ctrl)
-    }
-
-    # step 1: open Everhour
-    $bOpen = New-FlatButton -Text "Open Everhour in my browser" -X 0 -Y 0 -W 240 -H 36
-    $bOpen.Add_Click({ Start-Process "https://app.everhour.com/" })
-    Add-To 1 $bOpen
-    Add-To 1 (New-Label "Already open? Just follow the animation above." 0 46 500 20 $FontSmall $UI.Muted)
-
-    # step 2: nothing to fill in
-    Add-To 2 (New-Label "Tip: the token is personal - treat it like a password." 0 0 500 20 $FontSmall $UI.Muted)
-
-    # step 3: paste + connect
-    $kb = New-TextBox 0 2 392 "" "Paste your API token here"
-    $kb.UseSystemPasswordChar = $true
-    Add-To 3 $kb
-    $ob.KeyBox = $kb
-    $bPaste = New-FlatButton -Text "Paste" -X 400 -Y 0 -W 112 -H 30
-    $bPaste.Add_Click({
-        try { $clip = [System.Windows.Forms.Clipboard]::GetText().Trim(); if ($clip) { $Script:OB.KeyBox.Text = $clip } } catch { }
-    })
-    Add-To 3 $bPaste
-    $show = New-Object System.Windows.Forms.CheckBox
-    $show.Text = "Show token"; $show.Font = $FontSmall; $show.ForeColor = $UI.Muted
-    $show.Location = New-Object System.Drawing.Point(0, (Px 38))
-    $show.Size = New-Object System.Drawing.Size((Px 140), (Px 22))
-    $show.Add_CheckedChanged({ $Script:OB.KeyBox.UseSystemPasswordChar = -not $this.Checked })
-    Add-To 3 $show
-    $ob.KeyStatus = New-Label "" 0 64 512 44 $FontUI $UI.Muted
-    Add-To 3 $ob.KeyStatus
-    Add-To 3 (New-Label "Stored encrypted on this PC. Only ever sent to api.everhour.com." 0 112 512 20 $FontSmall $UI.Muted)
-
-    # step 4: look
-    $i = 0
-    $tilePanel = New-Object System.Windows.Forms.Panel
-    $tilePanel.Location = New-Object System.Drawing.Point(0, 0)
-    $tilePanel.Size = New-Object System.Drawing.Size((Px 512), (Px 52))
-    $tilePanel.BackColor = $UI.Bg
-    foreach ($name in $Script:Themes.Keys) { $tilePanel.Controls.Add((New-ThemeTile $name ($i * 86) 0 80 50)); $i++ }
-    Add-To 4 $tilePanel
-    Add-To 4 (New-Label "Font" 0 70 120 22 $FontUI $UI.Text)
-    $fonts = Get-AvailableFonts
-    $ob.FontBox = New-DarkCombo $fonts ([string]$Script:Cfg.FontFamily) 130 66 250 -FontPreview
-    $ob.FontBox.Add_SelectedIndexChanged({ $Script:Cfg.FontFamily = [string]$this.SelectedItem; Apply-Theme })
-    Add-To 4 $ob.FontBox
-    Add-To 4 (New-Label "Shape" 0 110 120 22 $FontUI $UI.Text)
-    $ob.ShapeBox = New-DarkCombo @("Wide", "Square") ([string]$Script:Cfg.Shape) 130 106 120
-    $ob.ShapeBox.Add_SelectedIndexChanged({ $Script:Cfg.Shape = [string]$this.SelectedItem; $Script:Anchor = $null; Place-Form; Apply-Theme })
-    Add-To 4 $ob.ShapeBox
-    Add-To 4 (New-Label "Everything can be changed later in Settings." 0 150 500 20 $FontSmall $UI.Muted)
-
-    # step 5: workday
-    Add-To 5 (New-Label "Daily target (hours)" 0 4 200 22 $FontUI $UI.Text)
-    $ob.Target = New-NumBox 0 24 ([double]$Script:Cfg.DailyTargetHours) 220 0 1 0.5
-    Add-To 5 $ob.Target
-    Add-To 5 (New-Label "Break allowance (min/day)" 0 40 200 22 $FontUI $UI.Text)
-    $ob.Break = New-NumBox 0 600 ([double]$Script:Cfg.BreakLimitMinutes) 220 36
-    Add-To 5 $ob.Break
-    Add-To 5 (New-Label "Break tasks contain" 0 76 200 22 $FontUI $UI.Text)
-    $ob.Words = New-TextBox 220 72 220 ([string]$Script:Cfg.BreakKeywords) "break, lunch"
-    Add-To 5 $ob.Words
-    $ob.Red = New-Toggle "Turn red when no timer is running" ([bool]$Script:Cfg.RedWhenStopped) 0 112 512
-    Add-To 5 $ob.Red
-    $ob.Auto = New-Toggle "Start automatically when Windows starts" $true 0 146 512
-    Add-To 5 $ob.Auto
-
-    # step 6: tips
-    $tips = "Round button - start / stop (resumes your last task)`r`nClick the widget - today's time, task by task`r`nRight-click - start a task, settings, exit`r`n$($Script:Cfg.Hotkey) - start / stop from anywhere"
-    Add-To 6 (New-Label $tips 0 0 512 92 $FontUI $UI.Text)
-
-    # footer
-    $dots = New-Object System.Windows.Forms.Panel
-    $dots.Location = New-Object System.Drawing.Point((Px 24), (Px 606))
-    $dots.Size = New-Object System.Drawing.Size((Px 160), (Px 16))
-    $dots.BackColor = $UI.Bg
-    Set-DoubleBuffered $dots
-    $dots.Add_Paint({
-        param($s, $e)
-        $g = $e.Graphics; $g.SmoothingMode = "AntiAlias"
-        for ($i = 0; $i -lt 7; $i++) {
-            $w = if ($i -eq $Script:OB.Step) { Px 18 } else { Px 6 }
-            $x = 0; for ($j = 0; $j -lt $i; $j++) { $x += $(if ($j -eq $Script:OB.Step) { Px 18 } else { Px 6 }) + (Px 6) }
-            $c = if ($i -le $Script:OB.Step) { $UI.Accent } else { $UI.Line }
-            Fill-Round $g $c $x (Px 5) $w (Px 6) (Px 3)
-        }
-    })
-    $f.Controls.Add($dots)
-    $ob.Dots = $dots
-    $ob.Back = New-FlatButton -Text "Back" -X 320 -Y 596 -W 92 -H 38 -Ghost
-    $ob.Next = New-FlatButton -Text "Next" -X 420 -Y 596 -W 116 -H 38 -Primary
-    $f.Controls.Add($ob.Back); $f.Controls.Add($ob.Next)
-    $ob.Back.Add_Click({ Show-GuideStep ($Script:OB.Step - 1) })
-    $ob.Next.Add_Click({ Guide-Next })
-    $f.AcceptButton = $ob.Next
-
-    $anim = New-Object System.Windows.Forms.Timer
-    $anim.Interval = 40
-    $anim.Add_Tick({ $Script:OB.Stage.Invalidate() })
-    $ob.Anim = $anim
-
-    Show-GuideStep 0
-    $f.Add_Shown({ $Script:OB.Anim.Start() })
-    try { [void]$f.ShowDialog() } finally {
-        $anim.Stop(); $anim.Dispose()
-        $f.Dispose()
-        $Script:GuideOpen = $false
-    }
-    $haveKey = -not [string]::IsNullOrWhiteSpace((Get-ApiKey))
-    if ($haveKey) {
-        $Script:Cfg.OnboardingDone = $true
-        Save-Config
-    }
-    return $haveKey
-}
-
-function Show-GuideStep([int]$step) {
-    $ob = $Script:OB
-    if ($step -lt 0) { return }
-    $ob.Step = $step
-    $ob.Clock.Restart()
-    foreach ($k in $ob.Groups.Keys) { foreach ($c in $ob.Groups[$k]) { $c.Visible = ($k -eq $step) } }
-    $texts = @(
-        @("Your Everhour timer, always on screen", "This widget shows what you're tracking, turns red when nothing is running, and warns you when a break runs long. Setup takes about a minute."),
-        @("1.  Open your Everhour profile", "In Everhour, click your name at the bottom-left, then choose My Profile."),
-        @("2.  Copy your API token", "Scroll down to Application Access and click the copy button next to API Token."),
-        @("3.  Paste it here", "Press Paste (or Ctrl+V), then Connect. We check it with Everhour straight away."),
-        @("4.  Make it yours", "Pick a theme, a font and a shape. The preview above updates as you choose."),
-        @("5.  Your workday", "Set your daily target and how long your breaks can be. Over the limit, the widget turns red."),
-        @("You're all set", "The widget lives in the bottom-right corner. Drag it anywhere you like."))
-    $ob.Title.Text = $texts[$step][0]
-    $ob.Body.Text = $texts[$step][1]
-    $ob.Back.Visible = ($step -gt 0)
-    $ob.Next.Text = switch ($step) { 0 { "Let's go" } 3 { "Connect" } 6 { "Start using it" } default { "Next" } }
-    if ($step -eq 3) {
-        if ($ob.HadKey -or $ob.KeyOk) {
-            $ob.KeyStatus.ForeColor = $UI.Good
-            $who = if ($Script:UserName) { " as $($Script:UserName)" } else { "" }
-            $ob.KeyStatus.Text = "You're already connected$who. Paste a new token only if you want to change it."
-        } elseif (-not $RenderPreview -and -not $ob.KeyBox.Text) {
-            try {
-                $clip = [System.Windows.Forms.Clipboard]::GetText().Trim()
-                if ($clip -match '^[A-Za-z0-9\-_:.]{20,100}$') {
-                    $ob.KeyBox.Text = $clip
-                    $ob.KeyStatus.ForeColor = $UI.Good
-                    $ob.KeyStatus.Text = "Found a token on your clipboard - press Connect."
-                }
-            } catch { }
-        }
-        $ob.KeyBox.Focus() | Out-Null
-    }
-    $ob.Dots.Invalidate()
-    $ob.Stage.Invalidate()
-}
-
-function Guide-Next {
-    $ob = $Script:OB
-    switch ($ob.Step) {
-        3 {
-            $k = $ob.KeyBox.Text.Trim()
-            if (-not $k) {
-                if ($ob.HadKey -or $ob.KeyOk) { Show-GuideStep 4; return }
-                $ob.KeyStatus.ForeColor = $UI.Danger; $ob.KeyStatus.Text = "Paste your API token first."
-                return
-            }
-            if ($ob.Busy) { return }
-            $ob.Busy = $true
-            $ob.KeyStatus.ForeColor = $UI.Muted; $ob.KeyStatus.Text = "Checking with Everhour..."
-            Invoke-Api -Key $k -Requests @(@{ Name = "me"; Path = "/users/me" }) -OnDone {
-                param($m)
-                $ob = $Script:OB
-                $ob.Busy = $false
-                if ($ob.Form.IsDisposed) { return }
-                $r = $m["me"]
-                $k = $ob.KeyBox.Text.Trim()
-                if ($r -and $r.Ok -and $r.Data) {
-                    $Script:UserId = $r.Data.id
-                    $Script:UserName = [string]$r.Data.name
-                    Set-ApiKey $k; $ob.KeyOk = $true
-                    if ($Script:Ready) { After-KeyChanged }
-                    $ob.KeyBox.Text = ""
-                    Show-GuideStep 4
-                } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
-                    $ob.KeyStatus.ForeColor = $UI.Danger
-                    $ob.KeyStatus.Text = "Everhour didn't accept that token. Copy it again and make sure you got all of it."
-                } else {
-                    # offline: keep it; the widget will say if it's wrong
-                    Set-ApiKey $k; $ob.KeyOk = $true
-                    if ($Script:Ready) { After-KeyChanged }
-                    $ob.KeyBox.Text = ""
-                    $ob.KeyStatus.ForeColor = $UI.Muted
-                    Show-GuideStep 4
-                }
-            }
-        }
-        5 {
-            $c = $Script:Cfg
-            $c.DailyTargetHours = [double]$ob.Target.Value
-            $c.BreakLimitMinutes = [int]$ob.Break.Value
-            $c.BreakKeywords = $ob.Words.Text.Trim()
-            $c.RedWhenStopped = [bool]$ob.Red.Tag.On
-            if ($ob.Auto.Tag.On) { Install-Autostart | Out-Null } else { Remove-Autostart }
-            Save-Config
-            Apply-Theme
-            Show-GuideStep 6
-        }
-        6 {
-            $ob.Done = $true
-            Save-Config
-            $ob.Form.Close()
-        }
-        default { Show-GuideStep ($ob.Step + 1) }
-    }
-}
-
 # ===========================================================================
 #  HOTKEY
 # ===========================================================================
@@ -3683,7 +3938,8 @@ $miStop     = $menu.Items.Add("Stop timer")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
 $miRefresh  = $menu.Items.Add("Refresh now")
 $miOpen     = $menu.Items.Add("Open Everhour")
-$miShape    = $menu.Items.Add("Switch to square")
+$miShape    = $menu.Items.Add("Shape")
+function Get-NextShape { switch ([string]$Script:Cfg.Shape) { "Large" { return "Square" } "Square" { return "Wide" } default { return "Large" } } }
 $miSettings = $menu.Items.Add("Settings...")
 $miGuide    = $menu.Items.Add("Setup guide...")
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
@@ -3697,7 +3953,7 @@ $menu.Add_Opening({
     if ($last.Length -gt 34) { $last = $last.Substring(0, 33) + "..." }
     $miResume.Text = "Resume  $last"
     $miStart.Text = if ($Script:IsRunning) { "Switch task..." } else { "Start a timer..." }
-    $miShape.Text = if ($Script:Cfg.Shape -eq "Square") { "Switch to wide" } else { "Switch to square" }
+    $miShape.Text = "Shape: switch to " + (Get-NextShape).ToLower()
 })
 $miStart.Add_Click({ Show-TaskPicker })
 $miResume.Add_Click({ Resume-LastTask })
@@ -3705,12 +3961,11 @@ $miStop.Add_Click({ Stop-Timer })
 $miRefresh.Add_Click({ $Script:RecordsAt = [DateTime]::MinValue; $Script:WeekAt = [DateTime]::MinValue; Request-Poll -Force })
 $miOpen.Add_Click({ Start-Process "https://app.everhour.com/" })
 $miShape.Add_Click({
-    $Script:Cfg.Shape = if ($Script:Cfg.Shape -eq "Square") { "Wide" } else { "Square" }
-    Save-Config
-    Apply-Theme
+    $Script:IsExpanded = $false
+    Set-Cfg "Shape" (Get-NextShape)
 })
 $miSettings.Add_Click({ Show-Settings })
-$miGuide.Add_Click({ Show-Onboarding | Out-Null })
+$miGuide.Add_Click({ Show-Hub "setup" | Out-Null })
 $miExit.Add_Click({ $form.Close() })
 $form.ContextMenuStrip = $menu
 
@@ -3730,6 +3985,7 @@ function Get-HitAt($pt) {
 $form.Add_MouseDown({
     param($s, $e)
     $Script:LastInteract = Get-Date
+    if ($Script:HideTarget -eq 1) { Show-FromHide; return }
     if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
         $Script:Dragging  = $true
         $Script:DidMove   = $false
@@ -3740,6 +3996,7 @@ $form.Add_MouseDown({
 $form.Add_MouseMove({
     param($s, $e)
     $Script:LastInteract = Get-Date
+    if ($Script:HideTarget -eq 1) { Show-FromHide; return }     # hovering the edge strip brings it back
     if ($Script:Dragging) {
         $now = [System.Windows.Forms.Cursor]::Position
         $dx = $now.X - $Script:DragStart.X
@@ -3773,7 +4030,7 @@ $form.Add_MouseUp({
         "b_start"    { Show-TaskPicker }
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
-        default      { Set-Expanded (-not $Script:IsExpanded) }
+        default      { if ($Script:Cfg.Shape -ne "Large") { Set-Expanded (-not $Script:IsExpanded) } }
     }
 })
 
@@ -3847,8 +4104,8 @@ $uiTimer.Add_Tick({
     # today's entries: refresh after changes, every few minutes, and at midnight
     if ($Script:UserId) {
         $todayStr = $now.ToString("yyyy-MM-dd")
-        $maxAge = if ($Script:IsExpanded) { 60 } else { 180 }
-        $weekDue = $Script:IsExpanded -and $Script:Cfg.ShowWeekTotal -and
+        $maxAge = if (Test-ShowsList) { 60 } else { 180 }
+        $weekDue = (Test-ShowsList) -and
                    ((($now - $Script:WeekAt).TotalSeconds -gt 300) -or $Script:WeekDate -ne $todayStr)
         if ($Script:RecordsDate -ne $todayStr -and $Script:RecordsLoaded) {
             $Script:RecordsLoaded = $false; $Script:TodayByTask = @{}; $Script:TodayRecordsTotal = 0
@@ -3865,6 +4122,15 @@ $uiTimer.Add_Tick({
             Set-Expanded $false
         }
     }
+
+    # auto-hide: slide into the edge after a few seconds without the pointer
+    if ($Script:Cfg.AutoHide -and $Script:HideTarget -eq 0 -and -not $Script:Dragging -and -not $Script:HubOpen -and -not $Script:PickerOpen -and -not $menu.Visible) {
+        $overIt = $false
+        try { $overIt = $form.Bounds.Contains([System.Windows.Forms.Cursor]::Position) } catch { }
+        if ($overIt) { $Script:LastInteract = $now }
+        elseif (($now - $Script:LastInteract).TotalSeconds -ge 4) { Start-AutoHide }
+    }
+    if (-not $Script:Cfg.AutoHide -and $Script:HideTarget -eq 1) { Show-FromHide }
 
     if ($notify.Visible -and $now -gt $Script:NotifyHideAt) { $notify.Visible = $false }
     if (-not $Script:Cfg.Animations) {
@@ -3896,6 +4162,18 @@ $form.Add_Shown({
     Request-Poll -Force
     $uiTimer.Start()
     Update-AnimTimer
+    # First run (or first run of a new version): the setup questions. They
+    # open just after the widget appears, so every answer shows on it live.
+    if (-not $Script:Cfg.OnboardingDone -or [string]::IsNullOrWhiteSpace((Get-ApiKey))) {
+        $Script:SetupKick = New-Object System.Windows.Forms.Timer
+        $Script:SetupKick.Interval = 400
+        $Script:SetupKick.Add_Tick({
+            $Script:SetupKick.Stop()
+            $ok = Show-Hub "setup"
+            if (-not $ok -and [string]::IsNullOrWhiteSpace((Get-ApiKey))) { $form.Close() }
+        })
+        $Script:SetupKick.Start()
+    }
 })
 
 $form.Add_FormClosing({
@@ -3940,7 +4218,7 @@ if ($RenderPreview) {
         $Script:BaseDuration = $dur; $Script:TimerToday = $today; $Script:LastPollAt = Get-Date
     }
     $Script:Ready = $false; Apply-Theme
-    foreach ($shape in @("Wide", "Square")) {
+    foreach ($shape in @("Wide", "Square", "Large")) {
         $Script:Cfg.Shape = $shape; Apply-Theme
         $sfx = $shape.ToLower()
         Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120
@@ -3970,43 +4248,52 @@ if ($RenderPreview) {
     $Script:FixedAnimT = 2.3
     $Script:IsRunning = $false; $Script:TaskId = ""
 
-    # dialogs: open each one briefly, snapshot it, close it
-    function Capture-NextDialog([string]$name, [int]$delayMs, [switch]$ScrollEnd, [switch]$Guide) {
-        $Script:CapName = $name; $Script:CapScroll = [bool]$ScrollEnd; $Script:CapGuide = [bool]$Guide
-        $ct = New-Object System.Windows.Forms.Timer
-        $ct.Interval = $delayMs
-        $ct.Add_Tick({
-            $fm = @([System.Windows.Forms.Application]::OpenForms) | Where-Object { $_.Visible } | Select-Object -Last 1
-            if (-not $fm) { $this.Stop(); return }
-            if ($Script:CapScroll -and $Script:SBody) {
-                $Script:SBody.AutoScrollPosition = New-Object System.Drawing.Point(0, 99999); $fm.Refresh()
-            }
-            $nm = $Script:CapName
-            if ($Script:CapGuide) { $nm = "guide-$($Script:OB.Step)" }
-            $cb = New-Object System.Drawing.Bitmap($fm.Width, $fm.Height)
-            $fm.DrawToBitmap($cb, (New-Object System.Drawing.Rectangle(0, 0, $fm.Width, $fm.Height)))
-            $cb.Save((Join-Path $RenderPreview "$nm.png"), [System.Drawing.Imaging.ImageFormat]::Png)
-            $cb.Dispose()
-            if ($Script:CapGuide -and $Script:OB.Step -lt 6) { Show-GuideStep ($Script:OB.Step + 1); return }
-            $this.Stop()
-            $fm.Close()
-        })
-        $ct.Start()
+    # auto-hide edge strip
+    foreach ($mode in @("work", "stopped")) {
+        $Script:IsRunning = ($mode -eq "work"); if ($Script:IsRunning) { Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120 }
+        Update-ModeAndPalette -Snap
+        $pk = Build-Peek $Script:Pal $Script:Mode
+        $canvas = New-Object System.Drawing.Bitmap(($pk.Width + 60), ($pk.Height + 40))
+        $cg = [System.Drawing.Graphics]::FromImage($canvas); $cg.Clear((ToColor "#4E7A2C")); $cg.DrawImage($pk, 30, 20, $pk.Width, $pk.Height); $cg.Dispose()
+        $canvas.Save((Join-Path $RenderPreview "peek-$mode.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+        $canvas.Dispose(); $pk.Dispose()
     }
-    Capture-NextDialog "settings-top" 900; Show-Settings
-    Capture-NextDialog "settings-bottom" 900 -ScrollEnd; Show-Settings
-    $Script:OB = $null
-    Capture-NextDialog "guide" 900 -Guide; Show-Onboarding | Out-Null
+    $Script:IsRunning = $false; $Script:TaskId = ""
+
+    # hub: walk through every setup page, then Settings and its sub-pages
+    $Script:CapQueue = New-Object System.Collections.Queue
+    foreach ($pg in $Script:SetupPages) { $Script:CapQueue.Enqueue("setup:$pg") }
+    $ct = New-Object System.Windows.Forms.Timer
+    $ct.Interval = 900
+    $ct.Add_Tick({
+        $H = $Script:Hub
+        if (-not $H -or $H.Form.IsDisposed -or -not $H.Form.Visible) { return }
+        if ($H.Slide) { Finish-Slide }
+        $f = $H.Form
+        $nm = "$($H.Mode)-$($H.PageName)"
+        if ($Script:CapScrollNext) { $H.Current.AutoScrollPosition = New-Object System.Drawing.Point(0, 99999); $f.Refresh(); $nm += "-bottom" }
+        $cb = New-Object System.Drawing.Bitmap($f.Width, $f.Height)
+        $f.DrawToBitmap($cb, (New-Object System.Drawing.Rectangle(0, 0, $f.Width, $f.Height)))
+        $cb.Save((Join-Path $RenderPreview "hub-$nm.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+        $cb.Dispose()
+        if ($Script:CapScrollNext) { $Script:CapScrollNext = $false; $H.Current.AutoScrollPosition = New-Object System.Drawing.Point(0, 0) }
+        if ($Script:CapQueue.Count -eq 0) { $this.Stop(); $f.Close(); return }
+        $next = [string]$Script:CapQueue.Dequeue()
+        $parts = $next.Split(":")
+        if ($parts[0] -ne $H.Mode) { $f.Close(); return }
+        if ($parts[1] -eq "_scroll") { $Script:CapScrollNext = $true; return }
+        Hub-Go $parts[1] 1 -NoAnim
+    })
+    [void]$Script:CapQueue.Dequeue()      # setup starts on its first page by itself
+    $ct.Start()
+    Show-Hub "setup" | Out-Null
+    foreach ($pg in @("_scroll", "advanced", "workday")) { $Script:CapQueue.Enqueue("settings:$pg") }
+    $ct.Start()
+    Show-Hub "settings" | Out-Null
+    $ct.Stop()
     Write-Host "Preview images written to $RenderPreview"
     exit
 }
 
-# First run (or first run of v5): the setup guide. Without a token, there's
-# nothing to show, so quit if it's closed early.
-if (-not $Script:Cfg.OnboardingDone -or [string]::IsNullOrWhiteSpace((Get-ApiKey))) {
-    Apply-Theme
-    $okGuide = Show-Onboarding
-    if (-not $okGuide -and [string]::IsNullOrWhiteSpace((Get-ApiKey))) { exit }
-}
 
 [System.Windows.Forms.Application]::Run($form)
