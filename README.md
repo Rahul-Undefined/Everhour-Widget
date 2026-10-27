@@ -32,6 +32,10 @@ A task counts as a break when its name contains words you choose (e.g. "break", 
 
 Whatever the shape, the widget never goes off screen: opening it near an edge makes it grow the other way.
 
+## Today and This week
+
+The list on the widget has two groups, **Today** and **This week** — click a heading to open or close it (only one is open at a time, so the widget never grows too tall). Each shows five tasks; scroll with the mouse wheel for the rest. **Double-click any task to start its timer again.**
+
 ## Focus sessions and favourites
 
 <img src="docs/large-focus.png" alt="Focus session with quick-switch chips" width="300" align="right">
@@ -88,7 +92,8 @@ Run **`Build Share Folder.bat`**. It creates `Share\Everhour Widget` and `Share\
 
 ### Updating
 
-- **Version 7 and later update themselves.** A few hours after a new version is pushed to this repository, the widget shows *"Widget update available"*. Click it (or right-click → *Install update*, or Settings → *Updates*) and it downloads, installs and restarts — settings and token are kept.
+- **Version 8 and later:** with *Install updates automatically* on (the default), a new version installs itself shortly after start-up or within a few hours — no clicks. With it off, an **Update to v…** pill appears on the widget; click it to install. Settings and token are always kept.
+- **Version 7:** shows a *"Widget update"* notification — click it, or right-click → *Install update*.
 - **Coming from version 6 or older** (no updater yet): download the new ZIP (Code → Download ZIP), unzip it, and double-click **`Install Everhour Widget.vbs`** once. It replaces the old copy and keeps your settings. From then on updates are automatic.
 - **For the maintainer:** bump `$Script:Version` in `EverhourWidget.ps1` *and* `version` in `version.json`, then push to `main`. Installed widgets compare against `version.json`.
 

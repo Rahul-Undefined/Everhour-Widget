@@ -1,5 +1,5 @@
 ﻿<#
-    EverhourWidget.ps1  -  v7
+    EverhourWidget.ps1  -  v8
     =========================
     A customisable desktop widget showing your live Everhour timer.
 
@@ -36,7 +36,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "7.0"
+$Script:Version = "8.0"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -988,6 +988,8 @@ $Script:Toast         = ""
 $Script:ToastUntil    = [DateTime]::MinValue
 $Script:ToastIsError  = $false
 $Script:Clock         = [Diagnostics.Stopwatch]::StartNew()
+$Script:OpenGroup     = "today"     # which list is open: today, week or none
+$Script:ListScroll    = 0
 
 # When did the timer stop? Remembered across restarts so "off for 0:42" is right.
 $Script:StoppedSince = Get-Date
@@ -1074,7 +1076,7 @@ function Get-BreakdownRows {
     $rows = @{}
     foreach ($k in $Script:TodayByTask.Keys) {
         $v = $Script:TodayByTask[$k]
-        $rows[$k] = [pscustomobject]@{ Name = $v.Name; Sec = [double]$v.Sec; Running = $false }
+        $rows[$k] = [pscustomobject]@{ Id = $k; Name = $v.Name; Sec = [double]$v.Sec; Running = $false }
     }
     if ($Script:IsRunning) {
         $live = Get-LiveTaskToday
@@ -1082,10 +1084,36 @@ function Get-BreakdownRows {
             $rows[$Script:TaskId].Sec = [Math]::Max($rows[$Script:TaskId].Sec, $live)
             $rows[$Script:TaskId].Running = $true
         } else {
-            $rows[$Script:TaskId] = [pscustomobject]@{ Name = $Script:TaskName; Sec = $live; Running = $true }
+            $rows[$Script:TaskId] = [pscustomobject]@{ Id = $Script:TaskId; Name = $Script:TaskName; Sec = $live; Running = $true }
         }
     }
     return @($rows.Values | Where-Object { $_.Sec -gt 0 } | Sort-Object -Property Sec -Descending)
+}
+
+# This week, task by task (the running task counts its live time).
+$Script:WeekByTask = @{}
+function Get-WeekRows {
+    $rows = @{}
+    foreach ($k in $Script:WeekByTask.Keys) {
+        $v = $Script:WeekByTask[$k]
+        $rows[$k] = [pscustomobject]@{ Id = $k; Name = $v.Name; Sec = [double]$v.Sec; Running = $false }
+    }
+    if ($Script:IsRunning) {
+        $extra = [Math]::Max(0, (Get-LiveTaskToday) - (Get-RecordedForTask $Script:TaskId))
+        if ($rows.ContainsKey($Script:TaskId)) { $rows[$Script:TaskId].Sec += $extra; $rows[$Script:TaskId].Running = $true }
+        else { $rows[$Script:TaskId] = [pscustomobject]@{ Id = $Script:TaskId; Name = $Script:TaskName; Sec = (Get-LiveTaskToday); Running = $true } }
+    }
+    return @($rows.Values | Where-Object { $_.Sec -gt 0 } | Sort-Object -Property Sec -Descending)
+}
+
+# Double-click a task in the list to start it again.
+function Start-TaskById([string]$id, [string]$name) {
+    if (-not $id -or $id -eq "none") { return }
+    if ($Script:IsRunning -and $Script:TaskId -eq $id) { Set-Toast "Already running" 2; return }
+    if ($Script:IsRunning -and $Script:Cfg.ConfirmSwitch) {
+        if (-not (Show-Message "Switch task?" "Stop '$($Script:TaskName)' and start '$name'?" "Switch" "Cancel")) { return }
+    }
+    Start-Timer $id $name ""
 }
 function Get-WeekStart {
     $d = (Get-Date).Date
@@ -1120,7 +1148,11 @@ function Fold-RunningIntoRecords {
     $diff = [Math]::Max(0, $live - $e.Sec)
     $e.Sec += $diff
     $Script:TodayRecordsTotal += $diff
-    if ($Script:WeekLoaded) { $Script:WeekRecordsTotal += $diff }
+    if ($Script:WeekLoaded) {
+        $Script:WeekRecordsTotal += $diff
+        if (-not $Script:WeekByTask.ContainsKey($Script:TaskId)) { $Script:WeekByTask[$Script:TaskId] = @{ Name = $Script:TaskName; Sec = 0 } }
+        $Script:WeekByTask[$Script:TaskId].Sec += $diff
+    }
 }
 
 # ===========================================================================
@@ -1249,7 +1281,9 @@ function On-Records($m) {
     if ($w) {
         $Script:WeekAt = Get-Date
         if ($w.Ok) {
-            $Script:WeekRecordsTotal = (Sum-Records $w.Data).Sum
+            $ws = Sum-Records $w.Data
+            $Script:WeekRecordsTotal = $ws.Sum
+            $Script:WeekByTask = $ws.By
             $Script:WeekLoaded = $true
             $Script:WeekDate = $Script:RecReqDate
         }
@@ -1539,8 +1573,14 @@ function On-UpdateCheck($r) {
             $Script:UpdateAvail = @{ Version = [string]$r.Data.version; Notes = [string]$r.Data.notes }
             $msg = "Version $remote is ready to install"
             if (-not $Script:UpdManual) {
-                Show-Balloon "Widget update: v$remote" "$($r.Data.notes) Click here to install." "update"
+                if ($Script:Cfg.AutoUpdate -and -not (Test-Path (Join-Path $ScriptDir ".git"))) {
+                    $Script:AutoInstallPending = $true      # installs itself, no click needed
+                } elseif ($Script:UpdNotified -ne [string]$remote) {
+                    $Script:UpdNotified = [string]$remote
+                    Show-Balloon "Widget update: v$remote" "$($r.Data.notes) Click the Update pill on the widget to install." "update"
+                }
             }
+            Render
         } else {
             $Script:UpdateAvail = $null
             $msg = "You have the latest version ($($Script:Version))"
@@ -1657,15 +1697,19 @@ function Set-DwmLook($f) {
 
 # Screen sharing (Teams, Zoom, Meet...) and screenshots skip windows marked
 # WDA_EXCLUDEFROMCAPTURE; you still see them on your own screen.
-function Set-CaptureHidden($f) {
+function Set-CaptureHidden($f, [switch]$Always) {
     if (-not $Script:HasWinApi -or -not $f.IsHandleCreated) { return }
     try {
-        $aff = if ($Script:Cfg.HideFromCapture) { 0x11 } else { 0 }
+        $aff = if ($Script:Cfg.HideFromCapture -or $Always) { 0x11 } else { 0 }
         if (-not [EhWin]::SetWindowDisplayAffinity($f.Handle, $aff) -and $aff -ne 0) {
             Write-Log "Hide-from-screen-share not supported on this Windows version"
         }
     } catch { }
 }
+
+# Settings and dialogs see-through like the widget, but never so faint the
+# text gets hard to read.
+function Get-DialogOpacity { return [Math]::Max(0.78, [Math]::Min(1.0, [double]$Script:Cfg.Opacity / 100.0)) }
 
 function Set-DoubleBuffered($ctrl) {
     try {
@@ -1839,7 +1883,7 @@ function New-Dialog([string]$Title, [int]$W, [int]$H) {
     Enable-Drag $lbl
 
     $f.Add_KeyDown({ param($s, $e) if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $s.Close() } })
-    $f.Add_Shown({ param($s, $e) Set-DwmLook $s; Set-CaptureHidden $s; $s.Activate(); $s.BringToFront() })
+    $f.Add_Shown({ param($s, $e) Set-DwmLook $s; Set-CaptureHidden $s; $s.Opacity = Get-DialogOpacity; $s.Activate(); $s.BringToFront() })
     $f.Add_Paint({
         param($s, $e)
         if (-not $Script:DwmRounded) {
@@ -2094,7 +2138,8 @@ function Apply-Theme {
         $form.BackColor = $Script:C.Back
         $form.Opacity = [double]$c.Opacity / 100.0
     }
-    Set-CaptureHidden $form
+    Set-CaptureHidden $form -Always:($Script:HideTarget -eq 1)
+    if ($Script:HideTarget -eq 1) { $form.TopMost = $true }
     Update-ModeAndPalette
     Update-AnimTimer
     Render
@@ -2122,7 +2167,13 @@ function Render {
 }
 
 function Render-Core {
-    if ($Script:HideP -ge 0.999) { Push-Peek (Build-Peek $Script:Pal $Script:Mode); return }
+    if ($Script:HideP -ge 0.999) {
+        $pk = Build-Peek $Script:Pal $Script:Mode
+        Push-Peek $pk
+        Push-ExtraPeeks $pk
+        $pk.Dispose()
+        return
+    }
     $slide = 0.0
     if ($Script:HideP -gt 0.001) { $slide = Ease $Script:HideP }
     Push-Frame (Build-Frame $Script:Pal $Script:Mode) $slide
@@ -2148,6 +2199,9 @@ function Start-AutoHide {
     $cxw = $form.Left + $form.Width / 2
     $Script:HideSide = if ($cxw -gt ($wa.Left + $wa.Width / 2)) { "right" } else { "left" }
     $Script:HideTarget = 1
+    # the edge strip stays above every window, and never shows in a screen share
+    $form.TopMost = $true
+    Set-CaptureHidden $form -Always
     if (-not $Script:Cfg.Animations) { $Script:HideP = 1.0; Render }
     Update-AnimTimer
 }
@@ -2155,10 +2209,80 @@ function Start-AutoHide {
 function Show-FromHide {
     if ($Script:HideTarget -eq 0) { return }
     $Script:HideTarget = 0
+    Hide-ExtraPeeks
+    $form.TopMost = [bool]$Script:Cfg.AlwaysOnTop
+    Set-CaptureHidden $form
     $Script:PeekY = $null
     $Script:LastInteract = Get-Date
     if (-not $Script:Cfg.Animations) { $Script:HideP = 0.0; Render }
     Update-AnimTimer
+}
+
+# The strip on every other monitor too: hover any of them and the widget
+# slides out on that screen.
+$Script:PeekForms = @{}
+function Get-PeekForm([string]$dev) {
+    $pf = $Script:PeekForms[$dev]
+    if ($pf -and -not $pf.IsDisposed) { return $pf }
+    $pf = New-Object System.Windows.Forms.Form
+    $pf.Text = "Everhour Widget edge"
+    $pf.FormBorderStyle = "None"; $pf.ShowInTaskbar = $false; $pf.StartPosition = "Manual"
+    $pf.Location = New-Object System.Drawing.Point(-32000, -32000); $pf.Size = New-Object System.Drawing.Size(10, 10)
+    $pf.TopMost = $true
+    $pf.Tag = $dev
+    $pf.Add_MouseMove({ param($s, $e) Reveal-OnScreen ([string]$s.Tag) })
+    $pf.Add_MouseDown({ param($s, $e) Reveal-OnScreen ([string]$s.Tag) })
+    $null = $pf.Handle
+    $ex = [EhWin]::GetWindowLong($pf.Handle, -20) -bor 0x80 -bor 0x08000000 -bor 0x00080000   # tool window, no-activate, layered
+    [EhWin]::SetWindowLong($pf.Handle, -20, $ex) | Out-Null
+    Set-CaptureHidden $pf -Always
+    $Script:PeekForms[$dev] = $pf
+    return $pf
+}
+function Push-ExtraPeeks($bmp) {
+    if (-not $Script:Layered -or -not $Script:HasWinApi) { return }
+    $an = Get-Anchor
+    $mainScr = [System.Windows.Forms.Screen]::FromPoint((New-Object System.Drawing.Point(($an.X + 40), ($an.Y + 20))))
+    $mwa = $mainScr.WorkingArea
+    $py = if ($Script:PeekY) { $Script:PeekY } else { $mwa.Top + $mwa.Height / 2 }
+    $rel = [Math]::Max(0.0, [Math]::Min(1.0, ($py - $mwa.Top) / [Math]::Max(1, $mwa.Height)))
+    $seen = @{}
+    foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
+        if ($scr.DeviceName -eq $mainScr.DeviceName) { continue }
+        $seen[$scr.DeviceName] = $true
+        try {
+            $pf = Get-PeekForm $scr.DeviceName
+            $wa = $scr.WorkingArea
+            $x = if ($Script:HideSide -eq "right") { $wa.Right - $bmp.Width + (Px 4) } else { $wa.Left - (Px 4) }
+            $y = [int]($wa.Top + $rel * $wa.Height)
+            $y = [Math]::Max($wa.Top, [Math]::Min($y, $wa.Bottom - $bmp.Height))
+            [EhWin]::PushLayered($pf.Handle, $bmp, $x, $y) | Out-Null
+            [EhWin]::ShowWindow($pf.Handle, 4) | Out-Null    # SW_SHOWNOACTIVATE
+        } catch { }
+    }
+    foreach ($k in @($Script:PeekForms.Keys)) {
+        if (-not $seen.ContainsKey($k)) { try { $Script:PeekForms[$k].Dispose() } catch { }; $Script:PeekForms.Remove($k) }
+    }
+}
+function Hide-ExtraPeeks {
+    foreach ($pf in $Script:PeekForms.Values) { if ($pf -and -not $pf.IsDisposed) { try { [EhWin]::ShowWindow($pf.Handle, 0) | Out-Null } catch { } } }
+}
+function Reveal-OnScreen([string]$dev) {
+    if ($Script:HideTarget -ne 1) { return }
+    $scr = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.DeviceName -eq $dev } | Select-Object -First 1
+    if ($scr) {
+        $mwa = Get-AnchorScreen
+        $an = Get-Anchor
+        $rel = [Math]::Max(0.0, [Math]::Min(1.0, ($an.Y - $mwa.Top) / [Math]::Max(1, $mwa.Height)))
+        $wa = $scr.WorkingArea
+        $M = Get-FrameMargin
+        $w = (Get-ShapeWidth) + 2 * $M
+        $x = if ($Script:HideSide -eq "right") { $wa.Right - $w - (Px 8) + $M } else { $wa.Left + (Px 8) - $M }
+        $Script:Anchor = New-Object System.Drawing.Point($x, [int]($wa.Top + $rel * $wa.Height))
+        $Script:Cfg.PosX = $Script:Anchor.X; $Script:Cfg.PosY = $Script:Anchor.Y
+        Save-Config
+    }
+    Show-FromHide
 }
 
 function Build-Peek($Pal, [string]$Mode) {
@@ -2181,7 +2305,12 @@ function Build-Peek($Pal, [string]$Mode) {
         $cy = $M + (Px 12) + $i * (($h - (Px 24)) / ($n - 1))
         $a = 60
         switch ($Mode) {
-            "work"      { if ($i -lt [Math]::Ceiling(((Get-LiveElapsed) % 60) / 60.0 * $n)) { $a = 240 } }
+            "work"      {
+                $el = Get-LiveElapsed
+                $on = ($i -lt [Math]::Ceiling(($el % 60) / 60.0 * $n))
+                if ([int][Math]::Floor($el / 60) % 2 -eq 1) { $on = -not $on }     # alternate laps, no jump at :00
+                if ($on) { $a = 240 }
+            }
             "break"     { $a = [int](120 + 120 * (0.5 + 0.5 * [Math]::Sin($at * 1.6 - $i * 0.5))) }
             "overbreak" { $a = [int](80 + 175 * (0.5 + 0.5 * [Math]::Sin($at * 6 - $i * 0.9))) }
             "stopped"   { $head = ($at * 3.0) % $n; $d = [Math]::Abs($i - $head); $a = [int]([Math]::Max(50, 255 - $d * 70)) }
@@ -2202,10 +2331,9 @@ function Push-Peek($bmp) {
     $Script:Hits = @([pscustomobject]@{ Name = "peek"; Rect = (New-Object System.Drawing.RectangleF(0, 0, $bmp.Width, $bmp.Height)) })
     if ($Script:Layered) {
         try { [EhWin]::PushLayered($form.Handle, $bmp, $x, $y) | Out-Null } catch { }
-        $bmp.Dispose()
     } else {
         if ($Script:Frame) { $Script:Frame.Dispose() }
-        $Script:Frame = $bmp
+        $Script:Frame = $bmp.Clone()
         $form.SetBounds($x, $y, $bmp.Width, $bmp.Height)
         $form.Invalidate()
     }
@@ -2270,16 +2398,26 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
     $dim = A $pal.Muted 55
     switch ($mode) {
         "work" {
-            # one lap per minute, like a seconds hand - or, in a focus
-            # session, the time left draining away
-            $lit = ((Get-LiveElapsed) % 60) / 60.0 * $n
-            if ($Script:FocusPhase -eq "focus") { $lit = (Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * ($n - 1) }
-            $full = [int][Math]::Floor($lit)
-            Fill-DotRun $g (A $pal.Dot 235) $dots 0 ($full - 1) $rd
-            Fill-DotRun $g $dim $dots ($full + 1) ($n - 1) $rd
-            $hd = $dots[[Math]::Min($n - 1, $full)]
-            Fill-Circle $g (A $pal.Dot ([int](60 + 175 * ($lit - $full)))) $hd.X $hd.Y $rd
-            Fill-Circle $g (A $pal.Glow 70) $hd.X $hd.Y ($rd * 2.6)
+            # One lap per minute, like a seconds hand. Laps alternate: one lap
+            # lights the ring up, the next switches it off behind the head, so
+            # the motion never jumps back to empty at :00. In a focus session
+            # the ring shows the time left draining away instead.
+            $el = Get-LiveElapsed
+            $lit = ($el % 60) / 60.0 * $n
+            $fillLap = ([int][Math]::Floor($el / 60) % 2 -eq 0)
+            if ($Script:FocusPhase -eq "focus") { $lit = (Get-FocusLeft) / [Math]::Max(1, $Script:FocusLen) * ($n - 1); $fillLap = $true }
+            $full = [int][Math]::Min($n - 1, [Math]::Floor($lit))
+            $on = A $pal.Dot 235
+            if ($fillLap) {
+                Fill-DotRun $g $on $dots 0 ($full - 1) $rd
+                Fill-DotRun $g $dim $dots ($full + 1) ($n - 1) $rd
+            } else {
+                Fill-DotRun $g $dim $dots 0 ($full - 1) $rd
+                Fill-DotRun $g $on $dots ($full + 1) ($n - 1) $rd
+            }
+            $hd = $dots[$full]
+            Fill-Circle $g (A $pal.Dot ([int](110 + 145 * ($lit - [Math]::Floor($lit))))) $hd.X $hd.Y ($rd * 1.15)
+            Fill-Circle $g (A $pal.Glow 75) $hd.X $hd.Y ($rd * 2.8)
         }
         "break" {
             $limit = [Math]::Max(1, [double]$Script:Cfg.BreakLimitMinutes * 60)
@@ -2443,14 +2581,20 @@ function Build-Frame($Pal, [string]$Mode) {
     $rows = @(); $more = 0
     $rowH = $hT + (Px 11)
     $btnH = [single](Px 30)
+    $grpH = $hS + (Px 14)
     if ($expanded) {
-        $all = @(Get-BreakdownRows)
-        $rows = @($all | Select-Object -First 6)
-        $more = $all.Count - $rows.Count
-        $y += (Px 12) + 1 + (Px 10) + $hS + (Px 8)
-        if ($rows.Count -eq 0) { $y += $hT + (Px 8) } else { $y += $rows.Count * $rowH }
-        if ($more -gt 0) { $y += $hS + (Px 4) }
-        if ($true) { $y += $hS + (Px 10) }
+        # TODAY and THIS WEEK are groups; at most one is open, showing 5 rows
+        # that scroll, so the widget never grows past one open group
+        $open = [string]$Script:OpenGroup
+        $listAll = @()
+        if ($open -eq "today") { $listAll = @(Get-BreakdownRows) } elseif ($open -eq "week") { $listAll = @(Get-WeekRows) }
+        $vis = [Math]::Min(5, $listAll.Count)
+        $maxScroll = [Math]::Max(0, $listAll.Count - 5)
+        $scroll = [int][Math]::Max(0, [Math]::Min($Script:ListScroll, $maxScroll))
+        $Script:ListScroll = $scroll
+        $listH = if ($vis -eq 0) { $hT + (Px 8) } else { $vis * $rowH }
+        $y += (Px 12) + 1 + (Px 6) + 2 * $grpH
+        if ($open) { $y += $listH + (Px 4) }
         $favL = Get-FavLayout $W $P
         if ($favL) { $y += $hS + (Px 6) + $favL.H + (Px 10) }
         $y += (Px 6) + $btnH
@@ -2458,7 +2602,6 @@ function Build-Frame($Pal, [string]$Mode) {
     } else {
         $H = [single][Math]::Ceiling($collapsedBottom)
     }
-
     $bw = [int]($W + 2 * $M); $bh = [int]($H + 2 * $M)
     $bmp = New-Object System.Drawing.Bitmap($bw, $bh, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
@@ -2542,13 +2685,14 @@ function Build-Frame($Pal, [string]$Mode) {
     Add-Hit "toggle" ($btnX + $M) ($btnY + $M) $btnD $btnD
 
     # ---------- status chip ----------
-    $chip = ""; $chipC = $Pal.Error
+    $chip = ""; $chipC = $Pal.Error; $chipHit = ""
     if ($Script:Toast -and $now -lt $Script:ToastUntil) {
         $chip = $Script:Toast
         $chipC = if ($Script:ToastIsError) { $Pal.Error } else { $Pal.Accent }
     } elseif ($Script:LastError -eq "OFFLINE") { $chip = "offline" }
     elseif ($Script:LastError -eq "RATE") { $chip = "slowing down" }
     elseif ($Script:LastError -eq "AUTH") { $chip = "key rejected" }
+    elseif ($Script:UpdateAvail) { $chip = "Update to v$($Script:UpdateAvail.Version)"; $chipC = $Pal.Accent; $chipHit = "update" }
     elseif ($Script:FocusPhase -and -not $square) { $chip = (Get-FocusLabel).ToLower(); $chipC = $Pal.Accent }
 
     # ---------- texts ----------
@@ -2580,7 +2724,15 @@ function Build-Frame($Pal, [string]$Mode) {
             Fill-Circle $g (A $Pal.Dot $da) ($cxp + (Px 4)) ($capsRect[1] + $capsRect[3] / 2) ([single](Px 3.5)); $cxp += (Px 13)
         }
         if ($chip) {
-            Draw-Text $g $chip $F.SmallBold $chipC $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
+            if ($chipHit) {
+                $pw = [Math]::Min((Measure-W $chip $F.SmallBold) + (Px 14), $capsRect[0] + $capsRect[2] - $cxp)
+                $ph = $hS + (Px 6); $py0 = $capsRect[1] + ($capsRect[3] - $ph) / 2
+                Fill-Round $g (A $chipC $(if ($Script:Hover -eq $chipHit) { 90 } else { 50 })) ($cxp - (Px 4)) $py0 $pw $ph ($ph / 2)
+                Draw-Text $g $chip $F.SmallBold $Pal.Time ($cxp - (Px 4)) $py0 $pw $ph "Center"
+                Add-Hit $chipHit ($cxp - (Px 4) + $M) ($py0 + $M) $pw $ph
+            } else {
+                Draw-Text $g $chip $F.SmallBold $chipC $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
+            }
         } else {
             Draw-Text $g $caps $F.Caps $Pal.Muted $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
         }
@@ -2607,6 +2759,7 @@ function Build-Frame($Pal, [string]$Mode) {
             $chX = $lineR - $cw; $chY = $line1[1] + ($hT - $ch) / 2
             Fill-Round $g (A $chipC 38) $chX $chY $cw $ch ($ch / 2)
             Draw-Text $g $chip $F.Small $chipC $chX $chY $cw $ch "Center"
+            if ($chipHit) { Add-Hit $chipHit ($chX + $M) ($chY + $M) $cw $ch }
             $lineR = $chX - (Px 6)
         }
         $lx = $line1[0]
@@ -2675,47 +2828,68 @@ function Build-Frame($Pal, [string]$Mode) {
         $ey = $expStart + (Px 12)
         $lp = New-Object System.Drawing.Pen((A $Pal.Muted 70), 1)
         $g.DrawLine($lp, $P, $ey, ($W - $P), $ey); $lp.Dispose()
-        $ey += 1 + (Px 10)
-
-        Draw-Text $g "TODAY" $F.Caps $Pal.Muted $P $ey ($W / 2) $hS "Left"
-        $totText = if ($hasToday) { Format-Short $today } else { "--" }
-        Draw-Text $g $totText $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $hS "Right"
-        $ey += $hS + (Px 8)
-
-        if ($rows.Count -eq 0) {
-            $msg = if ($Script:RecordsLoaded) { "Nothing tracked yet today" } else { "Loading..." }
-            Draw-Text $g $msg $F.Task $Pal.Muted $P $ey ($W - 2 * $P) $hT "Left"
-            $ey += $hT + (Px 8)
-        } else {
-            $maxSec = [Math]::Max(1, $rows[0].Sec)
+        $ey += 1 + (Px 6)
+        $Script:RowNames = @{}
+        foreach ($grp in @("today", "week")) {
+            $isOpen = ($open -eq $grp)
+            $hovG = ($Script:Hover -eq "grp:$grp")
+            if ($hovG) { Fill-Round $g (A $Pal.Muted 32) ($P - (Px 6)) $ey ($W - 2 * $P + (Px 12)) $grpH (Px 8) }
+            # caret: down when open, right when closed
+            $cy = $ey + $grpH / 2; $cx = $P + (Px 4); $cs = [single](Px 3.5)
+            $tri = if ($isOpen) {
+                [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF(($cx - $cs), ($cy - $cs * 0.6))), (New-Object System.Drawing.PointF(($cx + $cs), ($cy - $cs * 0.6))), (New-Object System.Drawing.PointF($cx, ($cy + $cs * 0.8))))
+            } else {
+                [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF(($cx - $cs * 0.6), ($cy - $cs))), (New-Object System.Drawing.PointF(($cx - $cs * 0.6), ($cy + $cs))), (New-Object System.Drawing.PointF(($cx + $cs * 0.8), $cy)))
+            }
+            $tb = New-Object System.Drawing.SolidBrush($(if ($isOpen) { $Pal.Task } else { $Pal.Muted })); $g.FillPolygon($tb, $tri); $tb.Dispose()
+            $label = if ($grp -eq "today") { "TODAY" } else { "THIS WEEK" }
+            Draw-Text $g $label $F.Caps $(if ($isOpen) { $Pal.Task } else { $Pal.Muted }) ($P + (Px 14)) $ey ($W / 2) $grpH "Left"
+            $tot = if ($grp -eq "today") { if ($hasToday) { Format-Short $today } else { "--" } } else { $wk = Get-WeekTotal; if ($wk -ge 0) { Format-Short $wk } else { "--" } }
+            Draw-Text $g $tot $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $grpH "Right"
+            Add-Hit "grp:$grp" ($P - (Px 6) + $M) ($ey + $M) ($W - 2 * $P + (Px 12)) $grpH
+            $ey += $grpH
+            if (-not $isOpen) { continue }
+            if ($vis -eq 0) {
+                $msg = if ($grp -eq "today") { if ($Script:RecordsLoaded) { "Nothing tracked yet today" } else { "Loading..." } } else { if ($Script:WeekLoaded) { "Nothing tracked this week" } else { "Loading..." } }
+                Draw-Text $g $msg $F.Task $Pal.Muted $P $ey ($W - 2 * $P) $hT "Left"
+                $ey += $hT + (Px 8) + (Px 4)
+                continue
+            }
+            $listTop = $ey
+            $maxSec = [Math]::Max(1, $listAll[0].Sec)
             $durW = [single](Px 66)
-            foreach ($row in $rows) {
+            for ($r = $scroll; $r -lt $scroll + $vis; $r++) {
+                $row = $listAll[$r]
+                $Script:RowNames[[string]$row.Id] = [string]$row.Name
+                $hovR = ($Script:Hover -eq "row:$($row.Id)")
+                if ($hovR) { Fill-Round $g (A $Pal.Muted 34) ($P - (Px 6)) ($ey - (Px 3)) ($W - 2 * $P + (Px 12)) ($rowH - (Px 1)) (Px 7) }
                 $nc = if ($row.Running) { $Pal.Time } else { $Pal.Task }
                 $nf = if ($row.Running) { $F.TaskBold } else { $F.Task }
                 Draw-Text $g $row.Name $nf $nc $P $ey ($W - 2 * $P - $durW) $hT "Left"
                 $dc = if ($row.Running) { $Pal.Accent } else { $Pal.Task }
-                Draw-Text $g (Format-Short $row.Sec) $F.Task $dc ($W - $P - $durW) $ey $durW $hT "Right"
+                $durText = if ($hovR -and -not $row.Running) { "start" } else { Format-Short $row.Sec }
+                if ($hovR -and -not $row.Running) { $dc = $Pal.Accent }
+                Draw-Text $g $durText $F.Task $dc ($W - $P - $durW) $ey $durW $hT "Right"
                 $by = $ey + $hT + (Px 2); $bhh = [single][Math]::Max(2, (Px 3))
                 Fill-Round $g (A $Pal.Muted 40) $P $by ($W - 2 * $P) $bhh ($bhh / 2)
                 $fc = if ($row.Running) { $Pal.Accent } elseif (Test-IsBreak $row.Name) { A (ToColor "#5EEAD4") 190 } else { A $Pal.Muted 190 }
                 Fill-Round $g $fc $P $by ([Math]::Max($bhh, ($W - 2 * $P) * $row.Sec / $maxSec)) $bhh ($bhh / 2)
+                Add-Hit "row:$($row.Id)" ($P - (Px 6) + $M) ($ey - (Px 3) + $M) ($W - 2 * $P + (Px 12)) $rowH
                 $ey += $rowH
             }
-        }
-        if ($more -gt 0) {
-            Draw-Text $g "+$more more" $F.Small $Pal.Muted $P $ey ($W - 2 * $P) $hS "Left"
-            $ey += $hS + (Px 4)
-        }
-        if ($true) {
+            if ($maxScroll -gt 0) {
+                # thin scrollbar on the right of the list
+                $trackH = $vis * $rowH - (Px 6)
+                $sx = $W - (Px 9)
+                Fill-Round $g (A $Pal.Muted 40) $sx $listTop (Px 3) $trackH (Px 1.5)
+                $thH = [Math]::Max((Px 14), $trackH * $vis / $listAll.Count)
+                $thY = $listTop + ($trackH - $thH) * $scroll / $maxScroll
+                Fill-Round $g (A $Pal.Task 150) $sx $thY (Px 3) $thH (Px 1.5)
+            }
+            Add-Hit "list" $M ($listTop + $M) $W ($vis * $rowH)
             $ey += (Px 4)
-            $wk = Get-WeekTotal
-            $wkText = if ($wk -ge 0) { Format-Short $wk } else { "--" }
-            Draw-Text $g "This week" $F.Small $Pal.Muted $P $ey ($W / 2) $hS "Left"
-            Draw-Text $g $wkText $F.SmallBold $Pal.Task ($W / 2) $ey ($W / 2 - $P) $hS "Right"
-            $ey += $hS + (Px 6)
         }
-        if ($favL) {
-            # favourite tasks as one-click chips
+        if ($favL) {            # favourite tasks as one-click chips
             $ey += (Px 4)
             Draw-Text $g "QUICK SWITCH" $F.Caps $Pal.Muted $P $ey ($W - 2 * $P) $hS "Left"
             $ey += $hS + (Px 6)
@@ -3594,7 +3768,7 @@ function Build-Page-home($p) {
         [void](Add-HubCtrl $p (New-ActionRow "Install the update now" { $Script:Hub.After = { Install-Update }; $Script:Hub.Form.Close() } 24 $y)); $y += 52
     }
     [void](Add-HubCtrl $p (New-ActionRow "Check for updates" { $Script:Hub.UpdLabel.Text = "Checking..."; Check-Update -Manual } 24 $y)); $y += 52
-    [void](Add-HubCtrl $p (New-HubToggle "Check for updates automatically" "AutoUpdate" 24 $y)); $y += 44
+    [void](Add-HubCtrl $p (New-HubToggle "Install updates automatically" "AutoUpdate" 24 $y)); $y += 44
     [void](Add-HubCtrl $p (New-Label "Changes save automatically." 24 $y 352 20 $FontSmall $UI.Muted))
     $y += 30
     $sp = New-PaintPanel 0 $y 1 1; [void](Add-HubCtrl $p $sp)
@@ -3853,7 +4027,9 @@ function Finish-Slide {
 function Hub-Tick {
     $H = $Script:Hub
     if (-not $H -or $H.Form.IsDisposed) { return }
-    if ($H.Form.Opacity -lt 1) { $H.Form.Opacity = [Math]::Min(1.0, $H.Form.Opacity + 0.14) }
+    $tgt = Get-DialogOpacity
+    if ($H.Form.Opacity -lt $tgt - 0.005) { $H.Form.Opacity = [Math]::Min($tgt, $H.Form.Opacity + 0.12) }
+    elseif ($H.Form.Opacity -gt $tgt + 0.005) { $H.Form.Opacity = $tgt }
     if ($H.Slide) {
         $p = ($H.Clock.Elapsed.TotalSeconds - $H.Slide.T0) / 0.26
         if ($p -ge 1) { Finish-Slide }
@@ -4596,6 +4772,30 @@ $form.Add_MouseMove({
     $form.Cursor = if ($h) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
     if ($h -ne $Script:Hover) { $Script:Hover = $h; Render }
 })
+$form.Add_MouseDoubleClick({
+    param($s, $e)
+    $h = Get-HitAt $e.Location
+    if ($h -like "row:*") {
+        $id = $h.Substring(4)
+        Start-TaskById $id ([string]$Script:RowNames[$id])
+    }
+})
+$form.Add_MouseWheel({
+    param($s, $e)
+    $h = Get-HitAt $e.Location
+    if ($h -like "row:*" -or $h -eq "list") {
+        $Script:ListScroll += $(if ($e.Delta -gt 0) { -1 } else { 1 })
+        $Script:LastInteract = Get-Date
+        Render
+    }
+})
+function Toggle-Group([string]$grp) {
+    $Script:OpenGroup = if ($Script:OpenGroup -eq $grp) { "" } else { $grp }
+    $Script:ListScroll = 0
+    $Script:LastInteract = Get-Date
+    if ($Script:OpenGroup -eq "week" -and -not $Script:WeekLoaded) { Request-Records -WithWeek }
+    Render
+}
 $form.Add_MouseLeave({ if ($Script:Hover) { $Script:Hover = ""; Render } })
 $form.Add_MouseUp({
     param($s, $e)
@@ -4613,6 +4813,10 @@ $form.Add_MouseUp({
     switch -Wildcard (Get-HitAt $e.Location) {
         "toggle"     { Toggle-Timer }
         "fav:*"      { Start-Fav ([int]((Get-HitAt $e.Location).Substring(4))) }
+        "grp:*"      { Toggle-Group ((Get-HitAt $e.Location).Substring(4)) }
+        "row:*"      { }    # double-click starts it
+        "list"       { }
+        "update"     { Install-Update }
         "b_start"    { Show-TaskPicker }
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
@@ -4723,7 +4927,8 @@ $uiTimer.Add_Tick({
 
     Check-Focus
     # look for a new version 30 s after start, then every 6 hours
-    if ($Script:Cfg.AutoUpdate -and ($now - $Script:StartedAt).TotalSeconds -gt 30 -and ($now - $Script:UpdCheckedAt).TotalHours -ge 6) { Check-Update }
+    if (($now - $Script:StartedAt).TotalSeconds -gt 30 -and ($now - $Script:UpdCheckedAt).TotalHours -ge 6) { Check-Update }
+    if ($Script:AutoInstallPending -and -not $Script:HubOpen -and -not $Script:PickerOpen -and -not $Script:ActionBusy) { $Script:AutoInstallPending = $false; Install-Update }
 
     if ($notify.Visible -and $now -gt $Script:NotifyHideAt) { $notify.Visible = $false }
     if (-not $Script:Cfg.Animations) {
@@ -4898,6 +5103,17 @@ if ($RenderPreview) {
     $Script:Cfg.Shape = "Large"; Apply-Theme; Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120
     $Script:FocusPhase = "focus"; $Script:FocusLen = 1500; $Script:FocusEnd = (Get-Date).AddMinutes(17)
     Save-Preview "large-focus"
+    $Script:FocusPhase = ""
+    $Script:WeekByTask = @{ "ev:1" = @{ Name = "Q4 dashboard redesign"; Sec = 31000 }; "ev:2" = @{ Name = "Client sync call"; Sec = 14000 }
+                            "ev:3" = @{ Name = "Break Time"; Sec = 9000 }; "ev:4" = @{ Name = "Email and planning"; Sec = 6000 }
+                            "ev:5" = @{ Name = "Internal meeting"; Sec = 5400 }; "ev:6" = @{ Name = "Code review"; Sec = 3600 }; "ev:7" = @{ Name = "Hiring"; Sec = 1800 } }
+    $Script:OpenGroup = "week"; Save-Preview "large-week"
+    $Script:ListScroll = 2; Save-Preview "large-week-scrolled"; $Script:ListScroll = 0
+    $Script:OpenGroup = ""; Save-Preview "large-groups-closed"
+    $Script:OpenGroup = "today"
+    $Script:UpdateAvail = @{ Version = "8.1"; Notes = "" }; Save-Preview "large-update-pill"
+    $Script:Cfg.Shape = "Wide"; Apply-Theme; Save-Preview "wide-update-pill"; $Script:UpdateAvail = $null
+    $Script:Cfg.Shape = "Large"; Apply-Theme
     $Script:FocusPhase = ""; $Script:IsRunning = $false; $Script:TaskId = ""
     # add-missed-time picker
     $pt = New-Object System.Windows.Forms.Timer
