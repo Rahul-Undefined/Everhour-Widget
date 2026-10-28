@@ -1,4 +1,4 @@
 {
-  "version": "8.7",
-  "notes": "Clock in / clock out (Everhour timecards) - clocked out, nothing counts. Starts reliably with Windows. Win+R, Everhour opens it. Timer is closer to real time."
+  "version": "8.8",
+  "notes": "Update check works on networks where GitHub is slow over IPv6 (falls back to IPv4 and the GitHub API). Includes 8.7: clock in / clock out, reliable autostart, Win+R Everhour, real-time timer."
 }

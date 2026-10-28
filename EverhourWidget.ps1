@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.7"
+$Script:Version = "8.8"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -1771,7 +1771,27 @@ $Script:UpdWorker = {
     $res = [pscustomobject]@{ Name = $Kind; Ok = $false; Code = 0; Data = $null; Error = "" }
     try {
         if ($Kind -eq "updcheck") {
-            $res.Data = Invoke-RestMethod -Uri ($VersionUrl + "?t=" + [DateTime]::UtcNow.Ticks) -TimeoutSec 20 -UseBasicParsing
+            # raw.githubusercontent.com is IPv6-first; on networks where IPv6
+            # half-works .NET hangs there while everything else is fine. So:
+            # .NET with a short wait, then curl over IPv4, then the GitHub API.
+            $errs = @()
+            try { $res.Data = Invoke-RestMethod -Uri ($VersionUrl + "?t=" + [DateTime]::UtcNow.Ticks) -TimeoutSec 8 -UseBasicParsing } catch { $errs += $_.Exception.Message }
+            if (-not ($res.Data -and $res.Data.version)) {
+                $curl = Join-Path $env:WINDIR "System32\curl.exe"
+                if (Test-Path $curl) {
+                    try {
+                        $txt = (& $curl -4 -s -f -m 15 ($VersionUrl + "?t=" + [DateTime]::UtcNow.Ticks)) -join "`n"
+                        if ($txt) { $res.Data = $txt | ConvertFrom-Json }
+                    } catch { $errs += "curl: " + $_.Exception.Message }
+                }
+            }
+            if (-not ($res.Data -and $res.Data.version)) {
+                try {
+                    $api = $VersionUrl -replace '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/([^/]+)/(.+)$', 'https://api.github.com/repos/$1/$2/contents/$4?ref=$3'
+                    $res.Data = Invoke-RestMethod -Uri $api -Headers @{ Accept = "application/vnd.github.raw" } -TimeoutSec 15 -UseBasicParsing
+                } catch { $errs += "api: " + $_.Exception.Message }
+            }
+            if (-not ($res.Data -and $res.Data.version)) { throw ($errs -join " | ") }
         } else {
             $dir = Join-Path $env:TEMP ("everhour-widget-update-" + [guid]::NewGuid().ToString("N"))
             New-Item -ItemType Directory -Path $dir | Out-Null
@@ -4380,7 +4400,14 @@ $Script:AssetWorker = {
         try {
             $dst = Join-Path $Root ($f -replace "/", "\")
             New-Item -ItemType Directory -Force -Path (Split-Path $dst) | Out-Null
-            Invoke-WebRequest -Uri ($Base + $f) -OutFile "$dst.part" -UseBasicParsing -TimeoutSec 60
+            try { Invoke-WebRequest -Uri ($Base + $f) -OutFile "$dst.part" -UseBasicParsing -TimeoutSec 20 }
+            catch {
+                # same IPv6 trouble as the update check: retry with curl over IPv4
+                $curl = Join-Path $env:WINDIR "System32\curl.exe"
+                if (-not (Test-Path $curl)) { throw }
+                & $curl -4 -s -f -L -m 120 -o "$dst.part" ($Base + $f)
+                if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
+            }
             Move-Item "$dst.part" $dst -Force
             $got++
         } catch { $err = $_.Exception.Message }
