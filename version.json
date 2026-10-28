@@ -1,4 +1,4 @@
 {
-  "version": "8.6",
-  "notes": "The how-to-use tour now plays inside Settings (Settings, How to use). Missing files are fetched automatically."
+  "version": "8.7",
+  "notes": "Clock in / clock out (Everhour timecards) - clocked out, nothing counts. Starts reliably with Windows. Win+R, Everhour opens it. Timer is closer to real time."
 }

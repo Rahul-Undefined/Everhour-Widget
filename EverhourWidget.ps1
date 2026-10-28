@@ -28,6 +28,7 @@ param(
     [switch]$TestAutostart,
     [switch]$StopOthers,
     [switch]$Setup,            # copy this folder to %LOCALAPPDATA% and start it from there
+    [switch]$AtLogon,          # started at sign-in: if already running, stay quiet
     [switch]$BuildShare,       # make the "Share" folder + zip for other laptops
     [string]$RenderPreview     # folder: draws sample widget images there and exits
 )
@@ -36,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.6"
+$Script:Version = "8.7"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -345,29 +346,54 @@ sh.Run cmd, 0, False
 "@
 }
 
+# launch.vbs   - used at sign-in (passes -AtLogon, so a duplicate start stays quiet)
+# everhour.vbs - used by Win+R "Everhour" (brings a running widget to the front)
+$OpenLauncher = Join-Path $ConfigDir "everhour.vbs"
+$RunKey       = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$AppPathKey   = "HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\Everhour.exe"
+$AutoName     = "EverhourWidget"
+
 function Write-VbsLauncher {
     try {
         if (-not (Test-Path $ConfigDir)) { New-Item -ItemType Directory -Path $ConfigDir -Force | Out-Null }
-        (Get-LauncherVbs $ScriptPath) | Set-Content -Path $VbsLauncher -Encoding ASCII
+        (Get-LauncherVbs $ScriptPath "-AtLogon") | Set-Content -Path $VbsLauncher -Encoding ASCII
+        (Get-LauncherVbs $ScriptPath) | Set-Content -Path $OpenLauncher -Encoding ASCII
         return $true
     } catch { Write-Log "VBS launcher write failed: $($_.Exception.Message)"; return $false }
 }
 
+# Win+R -> "Everhour" starts the widget (or shows it if it's running).
+function Register-RunCommand {
+    try {
+        New-Item $AppPathKey -Force | Out-Null
+        Set-ItemProperty $AppPathKey -Name "(default)" -Value $OpenLauncher
+    } catch { Write-Log "Win+R command not registered: $($_.Exception.Message)" }
+}
+
+# Start at sign-in two ways: a logon task in Task Scheduler (runs right away)
+# and the registry Run key (works even where tasks are locked down). If both
+# fire, the second start just exits. The old Startup-folder shortcut was slow
+# and on some PCs never ran, so it is removed.
 function Install-Autostart {
     try {
         Write-VbsLauncher | Out-Null
-        $wsh = New-Object -ComObject WScript.Shell
-        $sc = $wsh.CreateShortcut($ShortcutPath)
-        if (Test-Path $VbsLauncher) {
-            $sc.TargetPath = "wscript.exe"
-            $sc.Arguments  = "`"$VbsLauncher`""
-        } else {
-            $sc.TargetPath = "powershell.exe"
-            $sc.Arguments  = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$ScriptPath`""
-        }
-        $sc.WorkingDirectory = $ScriptDir
-        $sc.Description      = "Everhour timer widget"
-        $sc.Save()
+        $wscript = Join-Path $env:WINDIR "System32\wscript.exe"
+        $cmd = "`"$wscript`" `"$VbsLauncher`""
+        if (-not (Test-Path $RunKey)) { New-Item $RunKey -Force | Out-Null }
+        Set-ItemProperty $RunKey -Name $AutoName -Value $cmd
+        try {
+            $existing = Get-ScheduledTask -TaskName $AutoName -ErrorAction SilentlyContinue
+            if (-not $existing -or $existing.Actions[0].Arguments -ne "`"$VbsLauncher`"") {
+                $me = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+                $a = New-ScheduledTaskAction -Execute $wscript -Argument "`"$VbsLauncher`""
+                $tr = New-ScheduledTaskTrigger -AtLogOn -User $me
+                $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+                $pr = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive -RunLevel Limited
+                Register-ScheduledTask -TaskName $AutoName -Description "Starts the Everhour widget when you sign in" -Action $a -Trigger $tr -Settings $set -Principal $pr -Force | Out-Null
+            }
+        } catch { Write-Log "Logon task not created ($($_.Exception.Message)); the Run key still starts the widget" }
+        if (Test-Path $ShortcutPath) { Remove-Item $ShortcutPath -Force -ErrorAction SilentlyContinue }
+        Register-RunCommand
         return $true
     } catch {
         Write-Log "Autostart install failed: $($_.Exception.Message)"
@@ -376,16 +402,21 @@ function Install-Autostart {
 }
 
 function Remove-Autostart {
+    Remove-ItemProperty $RunKey -Name $AutoName -ErrorAction SilentlyContinue
+    try { Unregister-ScheduledTask -TaskName $AutoName -Confirm:$false -ErrorAction Stop } catch { }
     if (Test-Path $ShortcutPath) { Remove-Item $ShortcutPath -Force -ErrorAction SilentlyContinue }
 }
-function Test-Autostart { return (Test-Path $ShortcutPath) }
+function Test-Autostart {
+    if (Test-Path $ShortcutPath) { return $true }     # older versions
+    return [bool](Get-ItemProperty $RunKey -Name $AutoName -ErrorAction SilentlyContinue)
+}
 
 # Autostart records an absolute path to this script. If the folder is moved or
-# renamed, or an older version installed a powershell.exe shortcut (which leaves
-# a taskbar button), the entry goes stale. Rewriting it on every start is cheap
-# and makes "move the folder" a non-event.
+# renamed the entry goes stale, so it is rewritten on every start. A git
+# checkout used for development never takes over from the installed copy.
 function Repair-Autostart {
-    if (-not (Test-Path $ShortcutPath)) { return }
+    if (-not (Test-Autostart)) { Write-VbsLauncher | Out-Null; Register-RunCommand; return }
+    if ((Test-Path (Join-Path $ScriptDir ".git")) -and (Test-Path (Join-Path $InstallDir "EverhourWidget.ps1")) -and $ScriptDir -ne $InstallDir) { return }
     try { Install-Autostart | Out-Null } catch { }
 }
 
@@ -518,11 +549,11 @@ if ($Setup) {
 #  CONFIG
 # ===========================================================================
 $Script:Defaults = [ordered]@{
-    ConfigVersion       = 6
+    ConfigVersion       = 7
     ApiKey              = ""      # legacy plain-text key; migrated to ApiKeyProtected
     ApiKeyProtected     = ""
     OnboardingDone      = $false
-    RefreshSeconds      = 20
+    RefreshSeconds      = 10
     Opacity             = 92      # background only - text always stays solid
     BackColor           = "#1C1C21"
     AccentColor         = "#4ADE80"
@@ -574,6 +605,7 @@ $Script:Defaults = [ordered]@{
     BreakTaskName       = ""
     AutoUpdate          = $true
     PrivacyMode         = $false  # eye on the widget: hide task names and times
+    ClockInOut          = $true   # Everhour timecards: clock in / out from the widget
 }
 
 $Script:Themes = [ordered]@{
@@ -588,7 +620,7 @@ $Script:Themes = [ordered]@{
 function Read-Config {
     $cfg = [ordered]@{}
     foreach ($k in $Script:Defaults.Keys) { $cfg[$k] = $Script:Defaults[$k] }
-    $ver = 6
+    $ver = 7
     if (Test-Path $ConfigPath) {
         try {
             $saved = Get-Content $ConfigPath -Raw | ConvertFrom-Json
@@ -619,7 +651,11 @@ function Read-Config {
         $cfg.TextSize = if ($tf -le 16) { "S" } elseif ($tf -le 19) { "M" } else { "L" }
         $cfg.OnboardingDone = $false     # show the new setup flow once
     }
-    $cfg.ConfigVersion = 6
+    if ($ver -lt 7) {
+        # v8.7: closer to real time - the old 20 s default refresh becomes 10 s
+        if ([int]$cfg.RefreshSeconds -eq 20) { $cfg.RefreshSeconds = 10 }
+    }
+    $cfg.ConfigVersion = 7
     return $cfg
 }
 
@@ -627,7 +663,7 @@ function Limit([double]$v, [double]$lo, [double]$hi) { return [Math]::Max($lo, [
 
 function Normalize-Config {
     $c = $Script:Cfg
-    try { $c.RefreshSeconds      = [int](Limit $c.RefreshSeconds 10 300) }       catch { $c.RefreshSeconds = 20 }
+    try { $c.RefreshSeconds      = [int](Limit $c.RefreshSeconds 5 300) }        catch { $c.RefreshSeconds = 10 }
     try { $c.Opacity             = [int](Limit $c.Opacity 30 100) }              catch { $c.Opacity = 92 }
     try { $c.Width               = [int](Limit $c.Width 240 600) }               catch { $c.Width = 300 }
     try { $c.SquareSize          = [int](Limit $c.SquareSize 150 280) }          catch { $c.SquareSize = 180 }
@@ -757,19 +793,17 @@ if ($Diagnose) {
 
     Write-Host "[2] Will it start when Windows starts?" -ForegroundColor Yellow
     $ok = $true
-    if (-not (Test-Path $ShortcutPath)) {
+    $runVal = (Get-ItemProperty $RunKey -Name $AutoName -ErrorAction SilentlyContinue).$AutoName
+    $task = Get-ScheduledTask -TaskName $AutoName -ErrorAction SilentlyContinue
+    if (-not $runVal -and -not $task) {
         Write-Host "    NO - no startup entry found." -ForegroundColor Red
         Write-Host "    Fix: start the widget once, or turn it on in Settings."
         $ok = $false
     } else {
-        Write-Host "    Startup entry: FOUND"
-        try {
-            $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
-            Write-Host "      runs: $($sc.TargetPath) $($sc.Arguments)"
-            if ($sc.TargetPath -notmatch "wscript") {
-                Write-Host "    ** Old-style entry - will show a taskbar button. **" -ForegroundColor Yellow
-            }
-        } catch { Write-Host "    Could not read the shortcut." -ForegroundColor Red; $ok = $false }
+        Write-Host "    Run key      : $(if ($runVal) { 'FOUND - ' + $runVal } else { 'missing' })"
+        Write-Host "    Logon task   : $(if ($task) { 'FOUND (' + $task.State + ')' } else { 'missing (the Run key is enough)' })"
+        $ap = (Get-ItemProperty $AppPathKey -ErrorAction SilentlyContinue).'(default)'
+        Write-Host "    Win+R Everhour: $(if ($ap) { 'registered' } else { 'not registered' })"
 
         if (-not (Test-Path $VbsLauncher)) {
             Write-Host "    Launcher file: MISSING ($VbsLauncher)" -ForegroundColor Red
@@ -862,13 +896,13 @@ if ($TestAutostart) {
     Write-Host "have to reboot to find out whether it works."
     Write-Host ""
 
-    if (-not (Test-Path $ShortcutPath)) {
+    $runVal = (Get-ItemProperty $RunKey -Name $AutoName -ErrorAction SilentlyContinue).$AutoName
+    if (-not $runVal) {
         Write-Host "FAIL: there is no startup entry to test." -ForegroundColor Red
         Write-Host "Start the widget once first." ; Write-Host ""
         exit
     }
-    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($ShortcutPath)
-    $tgt = $sc.TargetPath; $arg = $sc.Arguments
+    $tgt = Join-Path $env:WINDIR "System32\wscript.exe"; $arg = "`"$VbsLauncher`""
     Write-Host "Windows will run:  $tgt $arg"
     Write-Host ""
 
@@ -903,11 +937,18 @@ if ($TestAutostart) {
     exit
 }
 
-# Only one widget at a time.
+# Only one widget at a time. Starting it again (Win+R "Everhour", the Start
+# shortcut) asks the running one to come to the front instead.
 $Script:Mutex = New-Object System.Threading.Mutex($false, "Local\EverhourWidgetSingleInstance")
+$Script:ShowSignal = New-Object System.Threading.EventWaitHandle($false, [System.Threading.EventResetMode]::AutoReset, "Local\EverhourWidgetShow")
 if (-not $RenderPreview) {
-    try { if (-not $Script:Mutex.WaitOne(0, $false)) { exit } }
-    catch [System.Threading.AbandonedMutexException] { } catch { }
+    $mine = $true
+    try { $mine = $Script:Mutex.WaitOne(0, $false) }
+    catch [System.Threading.AbandonedMutexException] { $mine = $true } catch { }
+    if (-not $mine) {
+        if (-not $AtLogon) { try { [void]$Script:ShowSignal.Set() } catch { } }
+        exit
+    }
 }
 
 # ===========================================================================
@@ -926,7 +967,8 @@ $Script:ApiWorker = {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     } catch { }
     foreach ($rq in $Requests) {
-        $res = [pscustomobject]@{ Name = $rq.Name; Ok = $false; Code = 0; Data = $null; Error = "" }
+        $res = [pscustomobject]@{ Name = $rq.Name; Ok = $false; Code = 0; Data = $null; Error = ""; At = $null }
+        $t0 = [DateTime]::Now
         try {
             $p = @{ Uri = $Base + $rq.Path; Headers = @{ "X-Api-Key" = $Key }; Method = $rq.Method; TimeoutSec = 20; UseBasicParsing = $true }
             if ($rq.Body) {
@@ -939,6 +981,8 @@ $Script:ApiWorker = {
             if ($_.Exception.Response) { try { $res.Code = [int]$_.Exception.Response.StatusCode } catch { } }
             $res.Error = $_.Exception.Message
         }
+        # the server read its clock about half-way through the round trip
+        $res.At = $t0.AddTicks([long](([DateTime]::Now - $t0).Ticks / 2))
         $res
     }
 }.ToString()
@@ -1199,17 +1243,26 @@ function Fold-RunningIntoRecords {
 # ===========================================================================
 #  POLLING
 # ===========================================================================
-function Apply-TimerData($d) {
+function Apply-TimerData($d, $at) {
     $wasRunning = $Script:IsRunning
     $wasTask = $Script:TaskId
     if ($d -and $d.status -eq "active" -and $d.task) {
+        $prevLive = if ($wasRunning) { Get-LiveElapsed } else { -1 }
         $Script:IsRunning    = $true
         $Script:TaskId       = [string]$d.task.id
         $Script:TaskName     = [string]$d.task.name
         $Script:BaseDuration = 0; try { $Script:BaseDuration = [int]$d.duration } catch { }
         $Script:TimerToday   = 0; try { $Script:TimerToday = [int]$d.today } catch { }
         $Script:TimerComment = [string]$d.comment
-        $Script:LastPollAt   = Get-Date
+        # Real time: Everhour counted whole seconds at the moment it answered
+        # (mid round trip), so anchor there plus half a second - not when the
+        # answer reached us, which made the clock run a second or two behind.
+        if ($at -is [DateTime]) { $Script:LastPollAt = $at.AddMilliseconds(-500) } else { $Script:LastPollAt = Get-Date }
+        # never tick backwards by a hair after a refresh of the same timer
+        if ($wasRunning -and $wasTask -eq $Script:TaskId -and $prevLive -ge 0) {
+            $back = $prevLive - (Get-LiveElapsed)
+            if ($back -gt 0 -and $back -lt 2) { $Script:LastPollAt = $Script:LastPollAt.AddSeconds(-$back) }
+        }
         $Script:LastRunAt    = Get-Date
         if ($Script:Cfg.LastTaskId -ne $Script:TaskId -or $Script:Cfg.LastTaskName -ne $Script:TaskName) {
             $Script:Cfg.LastTaskId = $Script:TaskId
@@ -1248,6 +1301,8 @@ function Request-Poll([switch]$Force) {
     $reqs = @()
     if (-not $Script:UserId) { $reqs += @{ Name = "me"; Path = "/users/me" } }
     $reqs += @{ Name = "timer"; Path = "/timers/current" }
+    $cr = Get-ClockRequest
+    if ($cr) { $reqs += $cr }
     Invoke-Api -Requests $reqs -OnDone { param($m) On-Poll $m }
 }
 
@@ -1262,7 +1317,7 @@ function On-Poll($m) {
     if ($t) {
         if ($t.Ok) {
             $Script:LastError = ""
-            Apply-TimerData $t.Data
+            Apply-TimerData $t.Data $t.At
             $Script:FirstPollDone = $true
         } else {
             $err = "OFFLINE"
@@ -1274,6 +1329,7 @@ function On-Poll($m) {
             $Script:LastError = $err
         }
     }
+    if ($m["clock"]) { On-Clock $m["clock"] }
     if ($Script:PollAgain) { $Script:PollAgain = $false; Request-Poll -Force }
     Check-IdleNudge
     Render
@@ -1347,8 +1403,9 @@ function Start-Timer([string]$TaskId, [string]$TaskName, [string]$Comment, [stri
         $Script:ActionBusy = $false
         $r = $m["start"]
         if ($r -and $r.Ok) {
-            if ($r.Data -and $r.Data.status -eq "active") { Apply-TimerData $r.Data }
+            if ($r.Data -and $r.Data.status -eq "active") { Apply-TimerData $r.Data $r.At }
             $Script:LastError = ""
+            $Script:ClockAt = [DateTime]::MinValue    # Everhour may clock you in with the timer
             Play-Sound "start"
             Set-Toast $Script:StartDoneText 2
         } elseif ($r -and ($r.Code -eq 401 -or $r.Code -eq 403)) {
@@ -1387,7 +1444,148 @@ function Resume-LastTask {
 
 function Toggle-Timer {
     if ($Script:LastError -eq "AUTH") { Change-ApiKey | Out-Null; return }
-    if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask }
+    if ($Script:IsRunning) { Stop-Timer }
+    elseif ((Get-Mode) -eq "clockedout") { Clock-In }
+    else { Resume-LastTask }
+}
+
+# ===========================================================================
+#  CLOCK IN / CLOCK OUT  (Everhour timecards)
+#  Clocked out, the widget rests: nothing counts and nothing turns red. It
+#  starts counting again from the moment you clock in - from the widget or
+#  in Everhour itself (the state is re-read with every refresh).
+#  ClockState: "" not known yet, "in", "out", "na" (not available to you)
+# ===========================================================================
+$Script:ClockState = ""
+$Script:ClockUsed  = $false       # this account keeps timecards at all
+$Script:ClockInAt  = $null
+$Script:ClockOutAt = $null
+$Script:ClockAt    = [DateTime]::MinValue
+$Script:ClockBusy  = $false
+$Script:ClockLogged = $false
+
+function Test-ClockOn { return ([bool]$Script:Cfg.ClockInOut -and $Script:ClockState -in @("in", "out")) }
+
+function Get-ClockRequest {
+    if (-not $Script:Cfg.ClockInOut -or -not $Script:UserId) { return $null }
+    $age = ((Get-Date) - $Script:ClockAt).TotalSeconds
+    $due = if ($Script:ClockState -eq "na") { 1800 } else { 15 }
+    if ($age -lt $due) { return $null }
+    $Script:ClockAt = Get-Date
+    # a week back, to learn whether this account uses timecards at all
+    $from = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd"); $to = (Get-Date).ToString("yyyy-MM-dd")
+    return @{ Name = "clock"; Path = "/users/$($Script:UserId)/timecards?from=$from&to=$to" }
+}
+
+function Read-ClockTime([string]$s, [DateTime]$day) {
+    if ([string]::IsNullOrWhiteSpace($s)) { return $null }
+    $ts = Parse-HHmm $s
+    if ($ts) { return $day.Date.Add($ts) }
+    try { return [DateTime]::Parse($s, [Globalization.CultureInfo]::InvariantCulture) } catch { return $null }
+}
+
+# One timecard -> in/out, when you clocked in (the latest time) and out.
+function Apply-Timecard($tc) {
+    $today = (Get-Date).Date
+    $state = "out"; $inAt = $null; $outAt = $null
+    if ($tc) {
+        $inAt  = Read-ClockTime ([string]$tc.clockIn) $today
+        $outAt = Read-ClockTime ([string]$tc.clockOut) $today
+        if ($inAt -and -not $outAt) { $state = "in" }
+        # clocking in again later in the day: the history has the latest one
+        foreach ($h in @($tc.history)) {
+            if (-not $h -or $h.previousTime) { continue }      # skips edits of a time
+            $hAt = Read-ClockTime ([string]$h.time) $today
+            if ([string]$h.action -eq "clock-in") { $state = "in"; if ($hAt) { $inAt = $hAt } }
+            elseif ([string]$h.action -eq "clock-out") { $state = "out"; if ($hAt) { $outAt = $hAt } }
+        }
+        if ($state -eq "in" -and $outAt -and $inAt -and $outAt -gt $inAt) { $state = "out" }
+    }
+    $was = $Script:ClockState
+    $Script:ClockState = $state
+    $Script:ClockInAt = $inAt; $Script:ClockOutAt = $outAt
+    if ($was -eq "out" -and $state -eq "in" -and -not $Script:IsRunning) {
+        # clocked in somewhere else: count the time off from now, not from yesterday
+        $Script:StoppedSince = Get-Date
+    }
+}
+
+function On-Clock($r) {
+    if (-not $r) { return }
+    if (-not $r.Ok) {
+        if ($r.Code -in @(402, 403, 404)) { $Script:ClockState = "na" }
+        return
+    }
+    $cards = @($r.Data | Where-Object { $_ })
+    if (-not $Script:ClockLogged -and $cards.Count) {
+        $Script:ClockLogged = $true
+        try { Write-Log ("Timecard sample: " + ($cards[-1] | ConvertTo-Json -Depth 4 -Compress)) } catch { }
+    }
+    if (@($cards | Where-Object { $_.clockIn -or $_.history }).Count -gt 0) { $Script:ClockUsed = $true }
+    $todayStr = (Get-Date).ToString("yyyy-MM-dd")
+    $tc = $cards | Where-Object { [string]$_.date -eq $todayStr } | Select-Object -Last 1
+    Apply-Timecard $tc
+    Render
+}
+
+function Clock-In {
+    if ($Script:ClockBusy -or -not $Script:UserId) { return }
+    $Script:ClockBusy = $true
+    Set-Toast "Clocking in..." 20
+    Invoke-Api -Requests @(@{ Name = "cin"; Path = "/users/$($Script:UserId)/timecards/clock-in"; Method = "Post"; Body = @{ userDate = (Get-Date).ToString("yyyy-MM-dd") } }) -OnDone {
+        param($m)
+        $Script:ClockBusy = $false
+        $r = $m["cin"]
+        if ($r -and $r.Ok) {
+            $Script:ClockUsed = $true
+            if ($r.Data -and ($r.Data.clockIn -or $r.Data.history)) { Apply-Timecard $r.Data }
+            if ($Script:ClockState -ne "in") { $Script:ClockState = "in"; $Script:ClockInAt = Get-Date }
+            if (-not $Script:IsRunning) { $Script:StoppedSince = Get-Date }
+            Play-Sound "start"
+            Set-Toast "Clocked in" 3
+        } else {
+            Set-Toast "Couldn't clock in" 5 -IsError
+        }
+        $Script:ClockAt = [DateTime]::MinValue
+        Request-Poll -Force
+    }
+}
+
+function Clock-Out {
+    if ($Script:ClockBusy -or -not $Script:UserId) { return }
+    if ($Script:IsRunning) {
+        if (-not (Show-Message "Clock out?" "This stops '$($Script:TaskName)' and clocks you out for the day." "Clock out" "Cancel")) { return }
+    }
+    $Script:ClockBusy = $true
+    Set-Toast "Clocking out..." 20
+    $reqs = @()
+    if ($Script:IsRunning) { $reqs += @{ Name = "stop"; Path = "/timers/current"; Method = "Delete" } }
+    $reqs += @{ Name = "cout"; Path = "/users/$($Script:UserId)/timecards/clock-out"; Method = "Post" }
+    Invoke-Api -Requests $reqs -OnDone {
+        param($m)
+        $Script:ClockBusy = $false
+        if ($m["stop"] -and $m["stop"].Ok) { Apply-TimerData $null; $Script:FocusPhase = "" }
+        $r = $m["cout"]
+        if ($r -and $r.Ok) {
+            if ($r.Data -and ($r.Data.clockIn -or $r.Data.history)) { Apply-Timecard $r.Data }
+            if ($Script:ClockState -ne "out") { $Script:ClockState = "out"; $Script:ClockOutAt = Get-Date }
+            Play-Sound "stop"
+            Set-Toast "Clocked out" 3
+        } else {
+            Set-Toast "Couldn't clock out" 5 -IsError
+        }
+        $Script:ClockAt = [DateTime]::MinValue
+        Request-Poll -Force
+    }
+}
+
+function Toggle-Clock { if ($Script:ClockState -eq "in") { Clock-Out } else { Clock-In } }
+
+# The time off counts from the later of: the timer stopping, clocking in.
+function Get-OffSince {
+    $s = $Script:StoppedSince
+    if ((Test-ClockOn) -and $Script:ClockState -eq "in" -and $Script:ClockInAt -and $Script:ClockInAt -gt $s -and $Script:ClockInAt -le (Get-Date)) { $s = $Script:ClockInAt }
+    return $s
 }
 
 # ===========================================================================
@@ -2088,6 +2286,7 @@ function Get-Mode {
         return "work"
     }
     if (-not $Script:FirstPollDone -or $Script:LastError) { return "idle" }
+    if ((Test-ClockOn) -and $Script:ClockState -eq "out" -and $Script:ClockUsed) { return "clockedout" }
     if ($Script:Cfg.RedWhenStopped) { return "stopped" }
     return "idle"
 }
@@ -2106,6 +2305,11 @@ function Get-ModePalette([string]$mode) {
         "stopped" {
             return @{ Bg1 = ToColor "#3A0A0F"; Bg2 = ToColor "#B4182C"; Accent = ToColor "#FECDD3"; Glow = ToColor "#F43F5E"
                       Task = ToColor "#FECDD3"; Time = ToColor "#FFFFFF"; Muted = ToColor "#FB7185"; Error = ToColor "#FFF1F2"; Dot = ToColor "#FF4D5E" }
+        }
+        "clockedout" {
+            # off for the day: a calm night-blue, nothing counting
+            return @{ Bg1 = ToColor "#11131C"; Bg2 = ToColor "#262B45"; Accent = ToColor "#A5B4FC"; Glow = ToColor "#818CF8"
+                      Task = ToColor "#C7D2FE"; Time = ToColor "#E0E7FF"; Muted = ToColor "#6E76A0"; Error = $C.Error; Dot = ToColor "#A5B4FC" }
         }
         default {
             return @{ Bg1 = $C.Back; Bg2 = (Mix $C.Back $C.Accent 0.10); Accent = $C.Accent; Glow = $C.Accent
@@ -2258,6 +2462,19 @@ function Show-FromHide {
     $Script:LastInteract = Get-Date
     if (-not $Script:Cfg.Animations) { $Script:HideP = 0.0; Render }
     Update-AnimTimer
+}
+
+# Opened again while it is already running: slide out of the edge, sit above
+# other windows for a few seconds and open the list so it is easy to spot.
+$Script:ForwardUntil = $null
+function Bring-Forward {
+    Show-FromHide
+    Place-Form
+    $form.TopMost = $true
+    $Script:ForwardUntil = (Get-Date).AddSeconds(6)
+    $Script:LastInteract = Get-Date
+    if (-not $Script:IsExpanded -and $Script:Cfg.Shape -ne "Large") { Set-Expanded $true }
+    Render
 }
 
 # The strip on every other monitor too: hover any of them and the widget
@@ -2482,6 +2699,11 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
                 $g.FillPath($br, $p); $br.Dispose(); $p.Dispose()
             }
         }
+        "clockedout" {
+            # resting: the whole ring breathes slowly, nothing runs
+            $ba = if ($Script:Cfg.Animations) { [int](40 + 45 * (0.5 + 0.5 * [Math]::Sin($at * 2 * [Math]::PI / 6))) } else { 60 }
+            Fill-DotRun $g (A $pal.Dot $ba) $dots 0 ($n - 1) $rd
+        }
         "stopped" {
             # a red comet running round the edge
             Fill-DotRun $g (A $pal.Dot 45) $dots 0 ($n - 1) $rd
@@ -2567,6 +2789,8 @@ function Build-Frame($Pal, [string]$Mode) {
     $limit = [double]$cfg.BreakLimitMinutes * 60
     $showBar = ($showToday -and $target -gt 0) -or ($isBreak -and $limit -gt 0)
     $stoppedShow = ($Mode -eq "stopped")
+    $offSince = Get-OffSince
+    $clockBtn = Test-ClockOn
 
     # ---------- what goes where ----------
     if ($square) {
@@ -2709,6 +2933,16 @@ function Build-Frame($Pal, [string]$Mode) {
         Fill-Circle $g $fillC $cx $cy ($btnD / 2)
         $sq = $btnD * 0.30
         Fill-Round $g $Pal.Bg1 ($cx - $sq / 2) ($cy - $sq / 2) $sq $sq (Px 2)
+    } elseif ($Mode -eq "clockedout") {
+        # clock face: click to clock in
+        Fill-Circle $g (A $Pal.Accent $(if ($hovBtn) { 90 } else { 48 })) $cx $cy ($btnD / 2)
+        $cr = $btnD * 0.24
+        $cpen = New-Object System.Drawing.Pen($Pal.Accent, [single][Math]::Max(1.5, (Px 1.8)))
+        $cpen.StartCap = "Round"; $cpen.EndCap = "Round"
+        $g.DrawEllipse($cpen, ($cx - $cr), ($cy - $cr), (2 * $cr), (2 * $cr))
+        $g.DrawLine($cpen, $cx, $cy, $cx, ($cy - $cr * 0.62))
+        $g.DrawLine($cpen, $cx, $cy, ($cx + $cr * 0.5), ($cy + $cr * 0.18))
+        $cpen.Dispose()
     } else {
         $breathe = 1.0
         if ($Mode -eq "stopped") { $breathe = 1.0 + 0.06 * $pulse }
@@ -2747,6 +2981,7 @@ function Build-Frame($Pal, [string]$Mode) {
     $l1 = ""; $l1C = $Pal.Task; $l1F = $F.Task
     if ($hovBtn -and $Script:LastError -eq "AUTH") { $l1 = "Click to enter your API token"; $l1C = $Pal.Error }
     elseif ($hovBtn -and $Script:IsRunning) { $l1 = "Stop timer"; $l1C = $Pal.Accent }
+    elseif ($hovBtn -and $Mode -eq "clockedout") { $l1 = "Clock in"; $l1C = $Pal.Accent }
     elseif ($hovBtn) {
         $l1C = $Pal.Accent
         $l1 = if ($cfg.LastTaskId) { "Resume  " + $cfg.LastTaskName } else { "Start a timer" }
@@ -2754,13 +2989,17 @@ function Build-Frame($Pal, [string]$Mode) {
     elseif ($Mode -eq "overbreak") { $l1 = "Break over by " + (Format-Short ($breakSec - $limit)); $l1F = $F.TaskBold }
     elseif ($Script:IsRunning) { $l1 = $Script:TaskName }
     elseif (-not $Script:FirstPollDone -and -not $Script:LastError) { $l1 = "Connecting to Everhour..."; $l1C = $Pal.Muted }
-    elseif ($stoppedShow) { $l1 = "Timer off since " + $Script:StoppedSince.ToString("h:mm tt"); $l1C = $Pal.Task }
+    elseif ($stoppedShow) { $l1 = "Timer off since " + $offSince.ToString("h:mm tt"); $l1C = $Pal.Task }
+    elseif ($Mode -eq "clockedout") {
+        $l1 = if ($Script:ClockOutAt) { "Clocked out at " + $Script:ClockOutAt.ToString("h:mm tt") } else { "Not clocked in yet" }
+        $l1C = $Pal.Task
+    }
     else { $l1 = "Not tracking"; $l1C = $Pal.Muted }
 
     $timeText = Format-HMS 0
     $timeC = A $Pal.Time 115
     if ($Script:IsRunning) { $timeText = Format-HMS (Get-LiveElapsed); $timeC = $Pal.Time }
-    elseif ($stoppedShow) { $timeText = Format-HMS (($now - $Script:StoppedSince).TotalSeconds); $timeC = $Pal.Time }
+    elseif ($stoppedShow) { $timeText = Format-HMS (($now - $offSince).TotalSeconds); $timeC = $Pal.Time }
     if ($cfg.PrivacyMode) {
         if ($Script:TaskName -and $l1 -eq $Script:TaskName) { $l1 = Hide-Name $l1 }
         elseif ($l1 -like "Resume  *") { $l1 = "Resume  " + (Hide-Name $cfg.LastTaskName) }
@@ -2769,7 +3008,7 @@ function Build-Frame($Pal, [string]$Mode) {
     }
 
     if ($square) {
-        $caps = switch ($Mode) { "work" { "TRACKING" } "break" { "ON BREAK" } "overbreak" { "BREAK OVER" } "stopped" { "TIMER OFF" } default { "EVERHOUR" } }
+        $caps = switch ($Mode) { "work" { "TRACKING" } "break" { "ON BREAK" } "overbreak" { "BREAK OVER" } "stopped" { "TIMER OFF" } "clockedout" { "CLOCKED OUT" } default { "EVERHOUR" } }
         if ($Script:FocusPhase) { $caps = (Get-FocusLabel).ToUpper() }
         $cxp = $capsRect[0]
         if ($isBreak) { Draw-Cup $g $Pal.Accent $cxp ($capsRect[1] + (Px 6)) ([single](Px 15)) $at; $cxp += (Px 20) }
@@ -2790,7 +3029,7 @@ function Build-Frame($Pal, [string]$Mode) {
         } else {
             Draw-Text $g $caps $F.Caps $Pal.Muted $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
         }
-        if ($stoppedShow -and -not $hovBtn) { $l1 = Hide-Num ("Off since " + $Script:StoppedSince.ToString("h:mm tt")) }
+        if ($stoppedShow -and -not $hovBtn) { $l1 = Hide-Num ("Off since " + $offSince.ToString("h:mm tt")) }
         Draw-Text $g $l1 $l1F $l1C $line1[0] $line1[1] $line1[2] $line1[3] "Left"
         Draw-Text $g $timeText $timeFont $timeC $timeRect[0] $timeRect[1] $timeRect[2] $timeRect[3] "Left"
         if ($showToday -or $isBreak) {
@@ -2963,20 +3202,40 @@ function Build-Frame($Pal, [string]$Mode) {
         $ey += (Px 6)
 
         $gap = [single](Px 6)
-        $bW = ($W - 2 * $P - 2 * $gap) / 3
         $labels = @(
             @{ Name = "b_start"; Text = $(if ($Script:IsRunning) { if ($square) { "Switch" } else { "Switch task" } } elseif ($square) { "Start" } else { "Start task" }); Primary = $true },
-            @{ Name = "b_stop"; Text = $(if ($Script:IsRunning) { "Stop" } else { "Resume" }); Primary = $false },
-            @{ Name = "b_settings"; Text = "Settings"; Primary = $false })
+            @{ Name = "b_stop"; Text = $(if ($Script:IsRunning) { "Stop" } else { "Resume" }); Primary = $false })
+        $rowW = $W - 2 * $P
+        if ($clockBtn) {
+            # clock in / out takes the third place; Settings shrinks to a gear
+            $clockIn = ($Script:ClockState -eq "in")
+            $labels += @{ Name = "b_clock"; Text = $(if ($clockIn) { "Clock out" } else { "Clock in" }); Primary = (-not $clockIn) }
+            if ($Mode -eq "clockedout") { $labels[0].Primary = $false }
+            $gx = $W - $P - $btnH
+            $hovS = ($Script:Hover -eq "b_settings")
+            Fill-Round $g (A $Pal.Muted $(if ($hovS) { 90 } else { 48 })) $gx $ey $btnH $btnH ($btnH / 2)
+            Draw-Gear $g $Pal.Task ($gx + $btnH / 2) ($ey + $btnH / 2) ([single]($btnH * 0.22))
+            Add-Hit "b_settings" ($gx + $M) ($ey + $M) $btnH $btnH
+            $rowW -= $btnH + $gap
+        } else {
+            $labels += @{ Name = "b_settings"; Text = "Settings"; Primary = $false }
+        }
+        # with the clock button the middle one gives it some room
+        $wts = if ($clockBtn) { @(1.0, 0.78, 1.22) } else { @(1.0, 1.0, 1.0) }
+        $unit = ($rowW - 2 * $gap) / 3
+        $bx = $P - $gap; $bW = 0
         for ($i = 0; $i -lt 3; $i++) {
-            $bx = $P + $i * ($bW + $gap)
+            $bx += $bW + $gap
+            $bW = [single]($unit * $wts[$i])
             $hov = ($Script:Hover -eq $labels[$i].Name)
+            $bf = if ($labels[$i].Primary) { $F.TaskBold } else { $F.Task }
+            if ((Measure-W $labels[$i].Text $bf) -gt ($bW - (Px 8))) { $bf = if ($labels[$i].Primary) { $F.SmallBold } else { $F.Small } }
             if ($labels[$i].Primary) {
                 Fill-Round $g (A $Pal.Accent $(if ($hov) { 140 } else { 95 })) $bx $ey $bW $btnH ($btnH / 2)
-                Draw-Text $g $labels[$i].Text $F.TaskBold $Pal.Time $bx $ey $bW $btnH "Center"
+                Draw-Text $g $labels[$i].Text $bf $Pal.Time $bx $ey $bW $btnH "Center"
             } else {
                 Fill-Round $g (A $Pal.Muted $(if ($hov) { 90 } else { 48 })) $bx $ey $bW $btnH ($btnH / 2)
-                Draw-Text $g $labels[$i].Text $F.Task $Pal.Task $bx $ey $bW $btnH "Center"
+                Draw-Text $g $labels[$i].Text $bf $Pal.Task $bx $ey $bW $btnH "Center"
             }
             Add-Hit $labels[$i].Name ($bx + $M) ($ey + $M) $bW $btnH
         }
@@ -2994,6 +3253,17 @@ function Hide-Name([string]$s) {
 function Hide-Num([string]$s) {
     if (-not $Script:Cfg.PrivacyMode -or [string]::IsNullOrEmpty($s)) { return $s }
     return ($s -replace '\d', [string][char]0x2022)
+}
+function Draw-Gear($g, $color, [single]$cx, [single]$cy, [single]$s) {
+    $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.4, $s * 0.42))
+    $pen.StartCap = "Round"; $pen.EndCap = "Round"
+    for ($k = 0; $k -lt 8; $k++) {
+        $a = $k * [Math]::PI / 4
+        $g.DrawLine($pen, ($cx + [Math]::Cos($a) * $s * 0.9), ($cy + [Math]::Sin($a) * $s * 0.9), ($cx + [Math]::Cos($a) * $s * 1.25), ($cy + [Math]::Sin($a) * $s * 1.25))
+    }
+    $pen.Width = [single][Math]::Max(1.3, $s * 0.3)
+    $g.DrawEllipse($pen, ($cx - $s * 0.78), ($cy - $s * 0.78), ($s * 1.56), ($s * 1.56))
+    $pen.Dispose()
 }
 function Draw-Eye($g, $color, [single]$cx, [single]$cy, [single]$s, [bool]$closed) {
     $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.3, $s * 0.16))
@@ -3168,6 +3438,7 @@ function Toggle-Cfg([string]$key) {
     Set-Cfg $key (-not [bool]$Script:Cfg[$key])
     if ($key -eq "HotkeyEnabled") { Register-Hotkey }
     if ($key -eq "AutoHide" -and -not $Script:Cfg.AutoHide) { Show-FromHide }
+    if ($key -eq "ClockInOut") { $Script:ClockAt = [DateTime]::MinValue; if ($Script:Cfg.ClockInOut) { Request-Poll -Force } else { Render } }
 }
 
 function Get-CurrentThemeName {
@@ -3846,6 +4117,7 @@ function Build-Page-behaviour($p) {
                      @("Show seconds", "ShowSeconds", ""),
                      @("Show today's progress", "ShowTodayTotal", ""),
                      @("Ask before switching tasks", "ConfirmSwitch", ""),
+                     @("Clock in / clock out", "ClockInOut", "Everhour timecards; clocked out, nothing counts"),
                      @("Sounds", "Sounds", ""),
                      @("Start with Windows", "_autostart", ""))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y 352 $t[2]))
@@ -4202,7 +4474,7 @@ function Build-Page-advanced($p) {
     $ch = Add-HubCtrl $p (New-Chips @(@{ L = "6 h"; V = 6 }, @{ L = "7 h"; V = 7 }, @{ L = "8 h"; V = 8 }, @{ L = "9 h"; V = 9 }) 24 $y 352 { [double]$Script:Cfg.DailyTargetHours } { param($v) Set-Cfg "DailyTargetHours" ([double][Math]::Min(24, $v)) } "h")
     $y = Below $ch
     [void](Add-HubCtrl $p (New-Caps "Check Everhour every" 24 $y)); $y += 22
-    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "10 s"; V = 10 }, @{ L = "20 s"; V = 20 }, @{ L = "30 s"; V = 30 }, @{ L = "1 min"; V = 60 }) 24 $y 352 { [int]$Script:Cfg.RefreshSeconds } { param($v) Set-Cfg "RefreshSeconds" ([int]$v) })
+    $ch = Add-HubCtrl $p (New-Chips @(@{ L = "5 s"; V = 5 }, @{ L = "10 s"; V = 10 }, @{ L = "20 s"; V = 20 }, @{ L = "30 s"; V = 30 }) 24 $y 352 { [int]$Script:Cfg.RefreshSeconds } { param($v) Set-Cfg "RefreshSeconds" ([int]$v) })
     $y = Below $ch
     [void](Add-HubCtrl $p (New-Caps "Close the expanded view after" 24 $y)); $y += 22
     $ch = Add-HubCtrl $p (New-Chips @(@{ L = "Never"; V = 0 }, @{ L = "10 s"; V = 10 }, @{ L = "15 s"; V = 15 }, @{ L = "30 s"; V = 30 }) 24 $y 352 { [int]$Script:Cfg.AutoCollapseSeconds } { param($v) Set-Cfg "AutoCollapseSeconds" ([int]$v) })
@@ -5039,6 +5311,7 @@ $menu.ForeColor = $UI.Text
 $miStart    = $menu.Items.Add("Start a timer...")
 $miResume   = $menu.Items.Add("Resume last task")
 $miStop     = $menu.Items.Add("Stop timer")
+$miClock    = $menu.Items.Add("Clock in")
 $miFavs     = New-Object System.Windows.Forms.ToolStripMenuItem("Favourites")
 $miFocus    = New-Object System.Windows.Forms.ToolStripMenuItem("Focus")
 [void]$menu.Items.Add($miFavs); [void]$menu.Items.Add($miFocus)
@@ -5076,6 +5349,8 @@ function New-SubItem($parent, [string]$text, [scriptblock]$onClick, $tag = $null
 
 $menu.Add_Opening({
     $miStop.Enabled = $Script:IsRunning
+    $miClock.Visible = Test-ClockOn
+    $miClock.Text = if ($Script:ClockState -eq "in") { "Clock out" } else { "Clock in" }
     $last = [string]$Script:Cfg.LastTaskName
     $miResume.Visible = (-not $Script:IsRunning) -and [bool]$Script:Cfg.LastTaskId
     if ($last.Length -gt 34) { $last = $last.Substring(0, 33) + "..." }
@@ -5113,6 +5388,7 @@ $menu.Add_Opening({
 $miStart.Add_Click({ Show-TaskPicker })
 $miResume.Add_Click({ Resume-LastTask })
 $miStop.Add_Click({ Stop-Timer })
+$miClock.Add_Click({ Toggle-Clock })
 $miNote.Add_Click({ Show-NoteDialog })
 $miAddTime.Add_Click({ Show-TaskPicker -AddTime })
 $miRefresh.Add_Click({ $Script:RecordsAt = [DateTime]::MinValue; $Script:WeekAt = [DateTime]::MinValue; Request-Poll -Force })
@@ -5218,6 +5494,7 @@ $form.Add_MouseUp({
         "b_start"    { Show-TaskPicker }
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
+        "b_clock"    { Toggle-Clock }
         default      { if ($Script:Cfg.Shape -ne "Large") { Set-Expanded (-not $Script:IsExpanded) } }
     }
 })
@@ -5268,6 +5545,7 @@ function Test-WorkTime($now) {
 
 function Check-IdleNudge {
     if (-not $Script:Cfg.IdleNudge -or $Script:IsRunning -or $Script:LastError) { return }
+    if ($Script:Mode -eq "clockedout") { return }      # off for the day: no reminders
     try {
         $now = Get-Date
         if (-not (Test-WorkTime $now)) { return }
@@ -5323,6 +5601,13 @@ $uiTimer.Add_Tick({
     }
     if (-not $Script:Cfg.AutoHide -and $Script:HideTarget -eq 1) { Show-FromHide }
 
+    # Win+R "Everhour" (or the Start shortcut) while already running: come forward
+    try { if ($Script:ShowSignal -and $Script:ShowSignal.WaitOne(0)) { Bring-Forward } } catch { }
+    if ($Script:ForwardUntil -and $now -gt $Script:ForwardUntil) {
+        $Script:ForwardUntil = $null
+        if ($Script:HideTarget -eq 0) { $form.TopMost = [bool]$Script:Cfg.AlwaysOnTop }
+    }
+
     Check-Focus
     if (($now - $Script:StartedAt).TotalSeconds -gt 20) { Ensure-Assets }
     # look for a new version 30 s after start, then every 6 hours
@@ -5334,6 +5619,17 @@ $uiTimer.Add_Tick({
         Update-ModeAndPalette
         if (-not $Script:Dragging) { Render }
     }
+})
+
+# Animations off: redraw the moment the shown second changes, not on a
+# 1-second clock that drifts against it (which made seconds skip or lag).
+$Script:LastSecShown = -1
+$secTimer = New-Object System.Windows.Forms.Timer
+$secTimer.Interval = 100
+$secTimer.Add_Tick({
+    if ($Script:Cfg.Animations -or $Script:Dragging) { return }
+    $s = if ($Script:IsRunning) { [long][Math]::Floor((Get-LiveElapsed)) } else { [long][Math]::Floor(((Get-Date) - (Get-OffSince)).TotalSeconds) }
+    if ($s -ne $Script:LastSecShown) { $Script:LastSecShown = $s; Render }
 })
 
 $form.Add_Shown({
@@ -5353,11 +5649,13 @@ $form.Add_Shown({
     Place-Form
     Render
     if (-not $NoAutoInstall) {
-        if (Test-Autostart) { Repair-Autostart } elseif (-not $Script:Cfg.OnboardingDone) { Install-Autostart | Out-Null }
+        if (-not (Test-Autostart) -and -not $Script:Cfg.OnboardingDone) { Install-Autostart | Out-Null }
+        else { Repair-Autostart }
     }
     Register-Hotkey
     Request-Poll -Force
     $uiTimer.Start()
+    $secTimer.Start()
     Update-AnimTimer
     # First run (or first run of a new version): the setup questions. They
     # open just after the widget appears, so every answer shows on it live.
@@ -5374,7 +5672,7 @@ $form.Add_Shown({
 })
 
 $form.Add_FormClosing({
-    $uiTimer.Stop(); $animTimer.Stop(); $Script:JobTimer.Stop()
+    $uiTimer.Stop(); $secTimer.Stop(); $animTimer.Stop(); $Script:JobTimer.Stop()
     try { if ($Script:Hot) { $Script:Hot.Dispose() } } catch { }
     $notify.Visible = $false; $notify.Dispose()
 })
@@ -5517,6 +5815,16 @@ if ($RenderPreview) {
     $Script:Cfg.Shape = "Wide"; Apply-Theme; Save-Preview "wide-update-pill"; $Script:UpdateAvail = $null
     $Script:Cfg.Shape = "Large"; Apply-Theme
     $Script:FocusPhase = ""; $Script:IsRunning = $false; $Script:TaskId = ""
+    # clock in / out
+    $Script:ClockUsed = $true
+    $Script:ClockState = "out"; $Script:ClockInAt = (Get-Date).Date.AddHours(9.5); $Script:ClockOutAt = (Get-Date).Date.AddHours(18.6)
+    foreach ($shape in @("Large", "Square", "Wide")) { $Script:Cfg.Shape = $shape; Apply-Theme; Save-Preview "$($shape.ToLower())-clockedout" }
+    $Script:Cfg.Shape = "Large"; Apply-Theme
+    $Script:Hover = "toggle"; Save-Preview "large-clockedout-hover"; $Script:Hover = ""
+    $Script:ClockState = "in"; $Script:ClockOutAt = $null; $Script:ClockInAt = (Get-Date).AddMinutes(-4); $Script:StoppedSince = (Get-Date).AddHours(-15)
+    Save-Preview "large-clockedin-stopped"
+    Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120; Save-Preview "large-clockedin-running"
+    $Script:IsRunning = $false; $Script:TaskId = ""; $Script:ClockState = ""; $Script:ClockUsed = $false
     # add-missed-time picker
     $pt = New-Object System.Windows.Forms.Timer
     $pt.Interval = 4500

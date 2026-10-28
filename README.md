@@ -17,6 +17,7 @@ No admin rights. One PowerShell script, a few launchers and some open-source fon
 | <img src="docs/wide-break.png" width="300"> | **On a break** — calm teal gradient with a steaming cup. The bar shows how much of today's break allowance is used. |
 | <img src="docs/wide-overbreak.png" width="300"> | **Break over the limit** — fast red-orange gradient, chasing lights and warning stripes. |
 | <img src="docs/wide-stopped.png" width="300"> | **No timer running** — the whole widget turns red, a red dot circles the edge, and the timer counts how long you've been off. |
+| <img src="docs/wide-clockedout.png" width="300"> | **Clocked out** — calm night blue with a clock button. Nothing counts and nothing turns red until you clock in again. |
 
 A task counts as a break when its name contains words you choose (e.g. "break", "lunch"); the allowance is 1 hour a day by default.
 
@@ -40,6 +41,12 @@ Right-click the widget and choose **How to use...** for a three-minute interacti
 
 The list on the widget has two groups, **Today** and **This week** — click a heading to open or close it (only one is open at a time, so the widget never grows too tall). Each shows five tasks; scroll with the mouse wheel for the rest. **Double-click any task to start its timer again.**
 
+## Clock in and clock out
+
+If you use Everhour timecards, the widget clocks you in and out: the **Clock in / Clock out** button sits next to *Stop* (a gear takes Settings' place), and it's in the right-click menu too. Clocking out stops a running timer first. While you're clocked out the widget rests — no red, no "off for" counter — and once you clock in, the time off counts from that moment. Clock in from the Everhour website or app and the widget follows within about 15 seconds. Turn it off in Settings → Widget → *Clock in / clock out*.
+
+<img src="docs/large-clockedout.png" alt="Clocked out" width="260">
+
 ## Focus sessions and favourites
 
 <img src="docs/large-focus.png" alt="Focus session with quick-switch chips" width="300" align="right">
@@ -59,6 +66,8 @@ The list on the widget has two groups, **Today** and **This week** — click a h
 - **Task picker** — favourites first, recent tasks, live search, an optional note, confirm before switching
 - **Automatic updates** — checks GitHub every few hours and installs a new version with one click
 - **Global shortcut** — `Ctrl+Alt+E` starts or stops the timer from anywhere
+- **Win+R → `Everhour`** — opens the widget, or brings it to the front if it's already running
+- **Real-time timer** — synced to Everhour's clock (network delay is taken out), refreshed every 10 s by default
 - **Hidden from screen sharing** — Teams, Zoom, Meet and screenshots don't see it
 - **Modern fonts** — Inter (iPhone style), Doto (Nothing dot-matrix), Space Grotesk, Geist, Poppins, Manrope, Outfit, Sora and more
 - **Themes** — Graphite, Ocean, Midnight, Forest, Sunset, Light
@@ -88,7 +97,7 @@ Right-click → **Settings**. A compact list: look (theme, shape, font, text siz
 2. Double-click **`Install Everhour Widget.vbs`** (if Windows asks, click *Open*).
 3. Answer the setup questions.
 
-It installs to `%LOCALAPPDATA%\Programs\EverhourWidget` for your Windows user, starts automatically at login, and keeps working if you delete the download. To run it in place instead, use **`Start Everhour Widget.vbs`**.
+It installs to `%LOCALAPPDATA%\Programs\EverhourWidget` for your Windows user, starts automatically at login (from the Run list and a sign-in task, so one blocked entry doesn't stop it), adds `Everhour` to Win+R, and keeps working if you delete the download. To run it in place instead, use **`Start Everhour Widget.vbs`**.
 
 ### Share it with someone
 
@@ -110,6 +119,7 @@ Run **`Build Share Folder.bat`**. It creates `Share\Everhour Widget` and `Share\
 | Drag | Move it — position is remembered |
 | Right-click | Start, resume, stop, refresh, change shape, settings, setup guide, exit |
 | `Ctrl+Alt+E` | Start / stop from anywhere |
+| Win+R, `Everhour` | Open the widget / bring it to the front |
 
 ## Files
 

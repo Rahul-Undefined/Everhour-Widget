@@ -1,5 +1,5 @@
-EVERHOUR DESKTOP WIDGET  (v5)
-=============================
+EVERHOUR DESKTOP WIDGET  (v8.7)
+===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
 No admin rights needed.
@@ -19,6 +19,9 @@ yours.
 
 The widget starts by itself every time you log in to Windows - silently,
 with no black console windows. Nothing appears in your taskbar.
+
+Open it any time: press Win+R, type  Everhour  and press Enter. If it is
+already running it slides out and comes to the front.
 
 
 GIVING IT TO SOMEONE ELSE
@@ -40,7 +43,9 @@ WHAT THE COLOURS MEAN
   Red / orange, fast   your breaks today went over the allowance (1 hour by
                        default).
   Red, a dot circling  no timer is running. The big timer shows how long
-                       it has been off.
+                       it has been off (from when you clocked in, at most).
+  Night blue, a clock  you are clocked out: nothing counts and nothing
+                       turns red until you clock in again.
 
 
 USING IT
@@ -53,6 +58,18 @@ USING IT
   Right-click        menu: start, resume, stop, refresh, open Everhour,
                      change shape, settings, setup guide, exit
   Ctrl+Alt+E         start / stop from anywhere (change it in Settings)
+  Win+R, Everhour    opens the widget / brings it to the front
+
+
+CLOCK IN AND CLOCK OUT  (Everhour timecards)
+--------------------------------------------
+  Clock in / Clock out  the button next to Stop (or right-click the widget).
+                        Clocking out stops a running timer first.
+  Clocked out           the widget rests in night blue and does not count
+                        the time off.
+  Clocked in elsewhere  clock in from the Everhour website or app and the
+                        widget follows within about 15 seconds.
+  Turn it off           Settings -> Widget -> Clock in / clock out
 
 
 SHAPES AND AUTO-HIDE
@@ -71,7 +88,7 @@ Right-click -> Settings. Everything saves the moment you change it:
   - Look: theme, shape, font (Inter = iPhone style, Doto = Nothing dots...),
     text size S / M / L, background glass or solid
   - Widget: always on top, hide from screen sharing, auto-hide, seconds,
-    progress bar, ask before switching, start with Windows
+    progress bar, ask before switching, clock in / out, start with Windows
   - Focus: animations, edge lights, red when stopped, breaks
   - Work hours (scroll wheels), work days and reminders
   - Advanced: daily target, refresh speed, auto-collapse, keyboard shortcut
@@ -81,6 +98,8 @@ Right-click -> Settings. Everything saves the moment you change it:
 CHECKING IT WILL START WHEN YOU POWER ON
 ----------------------------------------
 Run:  Test Autostart Now.bat
+The widget starts at sign-in from two places (the Run list and a sign-in
+task), so it still comes up if one of them is blocked.
 
 
 IF IT DOES NOT APPEAR
@@ -101,7 +120,7 @@ To revoke it: Everhour -> My Profile -> Application Access -> Reset Token.
 TURNING IT OFF
 --------------
   Just for now          right-click the widget -> Exit (or Stop Widget.bat)
-  Stop it starting up   Settings -> turn off "Start automatically..."
+  Stop it starting up   Settings -> Widget -> turn off "Start with Windows"
 
 
 FAVOURITES, FOCUS AND MORE  (right-click the widget)
