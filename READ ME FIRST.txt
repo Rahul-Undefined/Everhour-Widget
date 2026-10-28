@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v8.8)
+EVERHOUR DESKTOP WIDGET  (v8.9)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.

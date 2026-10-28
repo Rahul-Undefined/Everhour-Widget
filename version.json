@@ -1,4 +1,4 @@
 {
-  "version": "8.8",
-  "notes": "Update check works on networks where GitHub is slow over IPv6 (falls back to IPv4 and the GitHub API). Includes 8.7: clock in / clock out, reliable autostart, Win+R Everhour, real-time timer."
+  "version": "8.9",
+  "notes": "Bottom buttons sized to their words (no more cut-off Resume); the Large widget is a little wider."
 }

@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.8"
+$Script:Version = "8.9"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -2414,7 +2414,7 @@ function Apply-Theme {
 function Get-FrameMargin { if ($Script:Layered) { return (Px 12) } else { return 0 } }
 
 function Get-ShapeWidth {
-    switch ([string]$Script:Cfg.Shape) { "Square" { return (Px $Script:Cfg.SquareSize) } "Large" { return (Px 272) } default { return (Px $Script:Cfg.Width) } }
+    switch ([string]$Script:Cfg.Shape) { "Square" { return (Px $Script:Cfg.SquareSize) } "Large" { return (Px 300) } default { return (Px $Script:Cfg.Width) } }
 }
 
 function Get-CollapsedFrameHeight {
@@ -2814,8 +2814,8 @@ function Build-Frame($Pal, [string]$Mode) {
 
     # ---------- what goes where ----------
     if ($square) {
-        $W = if ($isLarge) { [single](Px 272) } else { [single](Px $cfg.SquareSize) }
-        if ($expanded) { $W = [single][Math]::Max($W, (Px 260)) }
+        $W = if ($isLarge) { [single](Px 300) } else { [single](Px $cfg.SquareSize) }
+        if ($expanded) { $W = [single][Math]::Max($W, (Px 290)) }
         $btnD = [single](Px 34)
         $btnX = $W - $P - $btnD; $btnY = $P - (Px 2)
         $capsRect = @(($P + (Px 2)), $P, ($btnX - $P - (Px 8)), ($btnD - (Px 4)))
@@ -3240,16 +3240,27 @@ function Build-Frame($Pal, [string]$Mode) {
         } else {
             $labels += @{ Name = "b_settings"; Text = "Settings"; Primary = $false }
         }
-        # with the clock button the middle one gives it some room
-        $wts = if ($clockBtn) { @(1.0, 0.78, 1.22) } else { @(1.0, 1.0, 1.0) }
-        $unit = ($rowW - 2 * $gap) / 3
+        # Each button is as wide as its word plus padding; the spare room is
+        # shared equally. Too tight? Smaller text first, then squeeze evenly.
+        $avail = $rowW - 2 * $gap
+        $pad = [single](Px 14)
+        $fonts = @(); $need = @()
+        foreach ($small in @($false, $true)) {
+            $fonts = @(foreach ($lb in $labels) {
+                if ($small) { if ($lb.Primary) { $F.SmallBold } else { $F.Small } } else { if ($lb.Primary) { $F.TaskBold } else { $F.Task } }
+            })
+            $need = @(for ($i = 0; $i -lt 3; $i++) { (Measure-W $labels[$i].Text $fonts[$i]) + $pad })
+            if (($need | Measure-Object -Sum).Sum -le $avail) { break }
+        }
+        $sum = ($need | Measure-Object -Sum).Sum
+        $widths = if ($sum -le $avail) { @($need | ForEach-Object { [single]($_ + ($avail - $sum) / 3) }) }
+                  else { @($need | ForEach-Object { [single]($_ * $avail / $sum) }) }
         $bx = $P - $gap; $bW = 0
         for ($i = 0; $i -lt 3; $i++) {
             $bx += $bW + $gap
-            $bW = [single]($unit * $wts[$i])
+            $bW = $widths[$i]
             $hov = ($Script:Hover -eq $labels[$i].Name)
-            $bf = if ($labels[$i].Primary) { $F.TaskBold } else { $F.Task }
-            if ((Measure-W $labels[$i].Text $bf) -gt ($bW - (Px 8))) { $bf = if ($labels[$i].Primary) { $F.SmallBold } else { $F.Small } }
+            $bf = $fonts[$i]
             if ($labels[$i].Primary) {
                 Fill-Round $g (A $Pal.Accent $(if ($hov) { 140 } else { 95 })) $bx $ey $bW $btnH ($btnH / 2)
                 Draw-Text $g $labels[$i].Text $bf $Pal.Time $bx $ey $bW $btnH "Center"
