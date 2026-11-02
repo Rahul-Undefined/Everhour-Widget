@@ -67,6 +67,7 @@ If you use Everhour timecards, the widget clocks you in and out: the **Clock in 
 - **Automatic updates** — checks GitHub every few hours and installs a new version with one click
 - **Global shortcut** — `Ctrl+Alt+E` starts or stops the timer from anywhere
 - **Win+R → `Everhour`** — opens the widget, or brings it to the front if it's already running
+- **Stays on Show desktop** — Win+D or the taskbar corner don't hide it (Settings → Widget)
 - **Real-time timer** — synced to Everhour's clock (network delay is taken out), refreshed every 10 s by default
 - **Hidden from screen sharing** — Teams, Zoom, Meet and screenshots don't see it
 - **Modern fonts** — Inter (iPhone style), Doto (Nothing dot-matrix), Space Grotesk, Geist, Poppins, Manrope, Outfit, Sora and more

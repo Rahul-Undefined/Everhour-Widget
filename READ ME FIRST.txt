@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v8.9)
+EVERHOUR DESKTOP WIDGET  (v9.0)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
@@ -59,6 +59,7 @@ USING IT
                      change shape, settings, setup guide, exit
   Ctrl+Alt+E         start / stop from anywhere (change it in Settings)
   Win+R, Everhour    opens the widget / brings it to the front
+  Win+D              the widget stays on the desktop (Settings -> Widget)
 
 
 CLOCK IN AND CLOCK OUT  (Everhour timecards)

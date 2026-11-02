@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "8.9"
+$Script:Version = "9.0"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -79,6 +79,25 @@ public static class EhWin {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr SendMessage(IntPtr h, int msg, IntPtr w, string l);
     [DllImport("gdi32.dll", CharSet=CharSet.Unicode)] public static extern int AddFontResourceEx(string file, uint fl, IntPtr res);
     [DllImport("user32.dll")]   public static extern bool SetWindowDisplayAffinity(IntPtr hWnd, uint affinity);
+    [DllImport("user32.dll")]   static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr h, System.Text.StringBuilder s, int n);
+    [DllImport("user32.dll")]   static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    // Win+D / Show desktop puts the desktop itself in front of every
+    // ordinary window; its window classes are WorkerW / Progman.
+    public static bool DesktopInFront() {
+        IntPtr f = GetForegroundWindow();
+        if (f == IntPtr.Zero) { return false; }
+        System.Text.StringBuilder sb = new System.Text.StringBuilder(64);
+        GetClassName(f, sb, 64);
+        string c = sb.ToString();
+        return c == "WorkerW" || c == "Progman";
+    }
+    // Lift above (or drop back from) the topmost band without taking focus.
+    public static void SetTopmost(IntPtr h, bool on) {
+        // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+        SetWindowPos(h, new IntPtr(on ? -1 : -2), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040);
+    }
 
     [StructLayout(LayoutKind.Sequential)] struct PT { public int x, y; }
     [StructLayout(LayoutKind.Sequential)] struct SZ { public int cx, cy; }
@@ -606,6 +625,7 @@ $Script:Defaults = [ordered]@{
     AutoUpdate          = $true
     PrivacyMode         = $false  # eye on the widget: hide task names and times
     ClockInOut          = $true   # Everhour timecards: clock in / out from the widget
+    StayOnDesktop       = $true   # still showing after Win+D / Show desktop
 }
 
 $Script:Themes = [ordered]@{
@@ -971,8 +991,12 @@ $Script:ApiWorker = {
         $t0 = [DateTime]::Now
         try {
             $p = @{ Uri = $Base + $rq.Path; Headers = @{ "X-Api-Key" = $Key }; Method = $rq.Method; TimeoutSec = 20; UseBasicParsing = $true }
-            if ($rq.Body) {
-                $p.Body = [Text.Encoding]::UTF8.GetBytes($rq.Body)
+            # Everhour answers 415 to a POST/PUT without a JSON body (clock-out
+            # has nothing to send), so those always carry one, even if empty
+            $body = $rq.Body
+            if (-not $body -and $rq.Method -in @("Post", "Put")) { $body = "{}" }
+            if ($body) {
+                $p.Body = [Text.Encoding]::UTF8.GetBytes($body)
                 $p.ContentType = "application/json; charset=utf-8"
             }
             $res.Data = Invoke-RestMethod @p
@@ -1544,7 +1568,7 @@ function Clock-In {
             Play-Sound "start"
             Set-Toast "Clocked in" 3
         } else {
-            Set-Toast "Couldn't clock in" 5 -IsError
+            Set-Toast (Get-ClockError $r "in") 5 -IsError
         }
         $Script:ClockAt = [DateTime]::MinValue
         Request-Poll -Force
@@ -1572,11 +1596,17 @@ function Clock-Out {
             Play-Sound "stop"
             Set-Toast "Clocked out" 3
         } else {
-            Set-Toast "Couldn't clock out" 5 -IsError
+            Set-Toast (Get-ClockError $r "out") 5 -IsError
         }
         $Script:ClockAt = [DateTime]::MinValue
         Request-Poll -Force
     }
+}
+
+function Get-ClockError($r, [string]$what) {
+    if (-not $r -or $r.Code -eq 0) { return "No connection - try again" }
+    if ($r.Code -in @(401, 403)) { return "Not allowed to clock $what" }
+    return "Couldn't clock $what ($($r.Code))"
 }
 
 function Toggle-Clock { if ($Script:ClockState -eq "in") { Clock-Out } else { Clock-In } }
@@ -4149,6 +4179,7 @@ function Build-Page-behaviour($p) {
                      @("Show today's progress", "ShowTodayTotal", ""),
                      @("Ask before switching tasks", "ConfirmSwitch", ""),
                      @("Clock in / clock out", "ClockInOut", "Everhour timecards; clocked out, nothing counts"),
+                     @("Stay visible on Show desktop", "StayOnDesktop", "Win+D or the taskbar corner won't hide it"),
                      @("Sounds", "Sounds", ""),
                      @("Start with Windows", "_autostart", ""))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y 352 $t[2]))
@@ -5659,6 +5690,30 @@ $uiTimer.Add_Tick({
     }
 })
 
+# Win+D / Show desktop: the desktop comes in front of every normal window,
+# which buried the widget. While the desktop is in front, lift the widget
+# into the topmost band; drop it back as soon as any other window is used.
+$Script:DeskUp = $false
+$deskTimer = New-Object System.Windows.Forms.Timer
+$deskTimer.Interval = 250
+$deskTimer.Add_Tick({
+    if (-not $Script:HasWinApi -or -not $Script:Ready) { return }
+    try {
+        $front = $Script:Cfg.StayOnDesktop -and [EhWin]::DesktopInFront()
+        if ($front) {
+            # every tick: other code may have reset TopMost meanwhile
+            $Script:DeskUp = $true
+            if ($form.WindowState -ne "Normal") { $form.WindowState = "Normal" }
+            [EhWin]::SetTopmost($form.Handle, $true)
+        } elseif (-not $front -and $Script:DeskUp) {
+            $Script:DeskUp = $false
+            if (-not $form.TopMost) { [EhWin]::SetTopmost($form.Handle, $false) }
+        }
+    } catch { }
+})
+# never stay minimised (Win+M / minimise-all)
+$form.Add_Resize({ if ($form.WindowState -eq "Minimized") { $form.WindowState = "Normal" } })
+
 # Animations off: redraw the moment the shown second changes, not on a
 # 1-second clock that drifts against it (which made seconds skip or lag).
 $Script:LastSecShown = -1
@@ -5694,6 +5749,7 @@ $form.Add_Shown({
     Request-Poll -Force
     $uiTimer.Start()
     $secTimer.Start()
+    $deskTimer.Start()
     Update-AnimTimer
     # First run (or first run of a new version): the setup questions. They
     # open just after the widget appears, so every answer shows on it live.
@@ -5710,7 +5766,7 @@ $form.Add_Shown({
 })
 
 $form.Add_FormClosing({
-    $uiTimer.Stop(); $secTimer.Stop(); $animTimer.Stop(); $Script:JobTimer.Stop()
+    $uiTimer.Stop(); $secTimer.Stop(); $deskTimer.Stop(); $animTimer.Stop(); $Script:JobTimer.Stop()
     try { if ($Script:Hot) { $Script:Hot.Dispose() } } catch { }
     $notify.Visible = $false; $notify.Dispose()
 })
