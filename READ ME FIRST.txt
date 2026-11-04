@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v9.0)
+EVERHOUR DESKTOP WIDGET  (v9.1)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
@@ -71,6 +71,10 @@ CLOCK IN AND CLOCK OUT  (Everhour timecards)
   Clocked in elsewhere  clock in from the Everhour website or app and the
                         widget follows within about 15 seconds.
   Turn it off           Settings -> Widget -> Clock in / clock out
+  Screen locked         lock the screen (Win+L) while clocked in and working:
+                        the timer switches to your break task with the note
+                        "Screen inactive", and your task resumes on unlock.
+                        Settings -> Focus and breaks to turn it off.
 
 
 SHAPES AND AUTO-HIDE

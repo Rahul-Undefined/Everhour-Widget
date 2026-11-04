@@ -1,4 +1,4 @@
 {
-  "version": "9.0",
-  "notes": "Clock out works again (Everhour needed a JSON body). The widget stays visible on Win+D / Show desktop."
+  "version": "9.1",
+  "notes": "Locking the screen while clocked in switches to your break task (note: Screen inactive) and resumes your task on unlock. Security tidy-ups: newer-only updates, temp files cleaned, tour fonts bundled."
 }

@@ -7,8 +7,15 @@
 <body>
 <title>Everhour Widget Tour</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@500&display=swap">
+<style>
+/* the widget's own bundled fonts (assets/fonts) - nothing loads from the internet */
+@font-face { font-family: "Sora"; src: url("fonts/Sora-Regular.ttf"); font-weight: 400 500; }
+@font-face { font-family: "Sora"; src: url("fonts/Sora-Bold.ttf"); font-weight: 600 700; }
+@font-face { font-family: "DM Sans"; src: url("fonts/DMSans-Regular.ttf"); font-weight: 400 500; }
+@font-face { font-family: "DM Sans"; src: url("fonts/DMSans-Bold.ttf"); font-weight: 600 700; }
+@font-face { font-family: "JetBrains Mono"; src: url("fonts/JetBrainsMono-Regular.ttf"); font-weight: 400 500; }
+@font-face { font-family: "JetBrains Mono"; src: url("fonts/JetBrainsMono-Bold.ttf"); font-weight: 600 700; }
+</style>
 <style>
 /* Layout: a video player for a desktop gadget - the stage plays a guided tour
    over real screenshots; captions sit beside it; chapters and a scrub bar below. */

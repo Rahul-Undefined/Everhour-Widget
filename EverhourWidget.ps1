@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.0"
+$Script:Version = "9.1"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -158,6 +158,24 @@ public static class EhWin {
             if (hb != IntPtr.Zero) { SelectObject(mem, old); DeleteObject(hb); }
             DeleteDC(mem);
         }
+    }
+}
+
+// Screen lock / unlock (Win+L, idle lock, sleep). Windows tells us through
+// SystemEvents; the widget's clock reads the counters once a second.
+public static class EhLock {
+    static int lockSeq, unlockSeq;
+    static bool started;
+    public static int LockSeq { get { return lockSeq; } }
+    public static int UnlockSeq { get { return unlockSeq; } }
+    public static void Start() {
+        if (started) { return; }
+        started = true;
+        Microsoft.Win32.SystemEvents.SessionSwitch += OnSwitch;
+    }
+    static void OnSwitch(object s, Microsoft.Win32.SessionSwitchEventArgs e) {
+        if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionLock) { System.Threading.Interlocked.Increment(ref lockSeq); }
+        else if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) { System.Threading.Interlocked.Increment(ref unlockSeq); }
     }
 }
 
@@ -440,7 +458,14 @@ function Repair-Autostart {
 }
 
 if ($Install)   { if (Install-Autostart) { Write-Host "Installed." } else { Write-Host "Failed." } ; exit }
-if ($Uninstall) { Remove-Autostart; Write-Host "Autostart removed."; exit }
+if ($Uninstall) {
+    # everything this widget registers: autostart, the Win+R name and its launchers
+    Remove-Autostart
+    Remove-Item $AppPathKey -Recurse -Force -ErrorAction SilentlyContinue
+    foreach ($f in @($VbsLauncher, $OpenLauncher)) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    Write-Host "Autostart and the Win+R 'Everhour' command removed."
+    exit
+}
 
 # Find running widgets. Must exclude THIS process: our own command line
 # contains "EverhourWidget.ps1", so a naive match counts itself.
@@ -554,7 +579,7 @@ if ($Setup) {
             Get-ChildItem $InstallDir -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
         }
         $target = Join-Path $InstallDir "EverhourWidget.ps1"
-        $tmpVbs = Join-Path $env:TEMP "everhour-widget-start.vbs"
+        $tmpVbs = Join-Path $env:TEMP ("everhour-widget-start-" + [guid]::NewGuid().ToString("N") + ".vbs")
         (Get-LauncherVbs $target) | Set-Content -Path $tmpVbs -Encoding ASCII
         Start-Process wscript.exe -ArgumentList "`"$tmpVbs`""
     } catch {
@@ -626,6 +651,7 @@ $Script:Defaults = [ordered]@{
     PrivacyMode         = $false  # eye on the widget: hide task names and times
     ClockInOut          = $true   # Everhour timecards: clock in / out from the widget
     StayOnDesktop       = $true   # still showing after Win+D / Show desktop
+    BreakOnLock         = $true   # screen locked while working: break task, back on unlock
 }
 
 $Script:Themes = [ordered]@{
@@ -761,8 +787,10 @@ function Set-ApiKey([string]$key) {
         $Script:Cfg.ApiKeyProtected = Protect-Key $key
         $Script:Cfg.ApiKey = ""
     } catch {
-        Write-Log "Key encryption failed, storing plain: $($_.Exception.Message)"
-        $Script:Cfg.ApiKey = $key
+        # never fall back to plain text on disk: keep it for this session only
+        Write-Log "Key encryption failed, key kept in memory only: $($_.Exception.Message)"
+        try { Show-Balloon "Token not saved" "Windows couldn't encrypt your Everhour token, so it is kept only until the widget closes." "" } catch { }
+        return
     }
     Save-Config
 }
@@ -1343,6 +1371,8 @@ function On-Poll($m) {
             $Script:LastError = ""
             Apply-TimerData $t.Data $t.At
             $Script:FirstPollDone = $true
+            if ($m["clock"]) { On-Clock $m["clock"]; $m.Remove("clock") }   # clock state first: the resume checks it
+            Check-LockResume
         } else {
             $err = "OFFLINE"
             if ($t.Code -eq 401 -or $t.Code -eq 403) { $err = "AUTH" }
@@ -1611,6 +1641,116 @@ function Get-ClockError($r, [string]$what) {
 
 function Toggle-Clock { if ($Script:ClockState -eq "in") { Clock-Out } else { Clock-In } }
 
+# ===========================================================================
+#  SCREEN LOCK = BREAK
+#  Lock the screen while clocked in and working: the timer switches to your
+#  break task, so the locked time counts as break. Unlock: back to the task
+#  you were on, with its note. Clocked out, on a break already, or with no
+#  timer running, locking changes nothing. (No timecards on the account:
+#  your work hours decide instead.)
+# ===========================================================================
+$Script:LockSeqSeen   = 0
+$Script:UnlockSeqSeen = 0
+$Script:ScreenLocked  = $false
+$Script:LockBreak     = $null      # @{ Id; Name; Comment; BreakId; BreakName; Started; TriedAt }
+$Script:LockResume    = $null      # set on unlock, acted on after a fresh poll
+$Script:BreakFindAt   = [DateTime]::MinValue
+
+function Test-OnTheClock {
+    # an account that never clocks in reads as "out" all day: work hours decide there
+    if ((Test-ClockOn) -and ($Script:ClockUsed -or $Script:ClockState -eq "in")) { return ($Script:ClockState -eq "in") }
+    return (Test-WorkTime (Get-Date))
+}
+
+# No break task learned yet: look one up by the break words, quietly.
+function Find-BreakTask {
+    if ($Script:Cfg.BreakTaskId -or -not $Script:UserId) { return }
+    if (((Get-Date) - $Script:BreakFindAt).TotalMinutes -lt 30) { return }
+    $Script:BreakFindAt = Get-Date
+    $kw = @(([string]$Script:Cfg.BreakKeywords) -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ }) | Select-Object -First 1
+    if (-not $kw) { return }
+    Invoke-Api -Requests @(@{ Name = "bfind"; Path = "/tasks/search?query=$([System.Uri]::EscapeDataString($kw))&limit=20" }) -OnDone {
+        param($m)
+        $r = $m["bfind"]
+        if (-not $r -or -not $r.Ok -or $Script:Cfg.BreakTaskId) { return }
+        $hit = @($r.Data) | Where-Object { $_ -and $_.id -and (Test-IsBreak ([string]$_.name)) } | Select-Object -First 1
+        if ($hit) {
+            $Script:Cfg.BreakTaskId = [string]$hit.id
+            $Script:Cfg.BreakTaskName = [string]$hit.name
+            Save-Config
+        }
+    }
+}
+
+function On-ScreenLock {
+    $Script:ScreenLocked = $true
+    $Script:LockResume = $null
+    if (-not $Script:Cfg.BreakOnLock -or -not $Script:IsRunning -or $Script:LastError) { return }
+    if (Test-IsBreak $Script:TaskName) { return }
+    if (-not (Test-OnTheClock)) { return }
+    $Script:LockBreak = @{ Id = $Script:TaskId; Name = $Script:TaskName; Comment = [string]$Script:TimerComment
+                           BreakId = ""; BreakName = ""; Started = $false; TriedAt = [DateTime]::MinValue }
+    Try-LockBreak
+}
+
+# Start the break; retried while still locked (sleep can cut the network).
+function Try-LockBreak {
+    $lb = $Script:LockBreak
+    if (-not $lb -or $lb.Started -or $Script:ActionBusy) { return }
+    if (((Get-Date) - $lb.TriedAt).TotalSeconds -lt 10) { return }
+    $lb.TriedAt = Get-Date
+    if (-not $Script:Cfg.BreakTaskId) { Find-BreakTask; return }    # tries again next round
+    $lb.BreakId = [string]$Script:Cfg.BreakTaskId; $lb.BreakName = [string]$Script:Cfg.BreakTaskName
+    $Script:ActionBusy = $true
+    $body = @{ task = $lb.BreakId; userDate = (Get-Date).ToString("yyyy-MM-dd"); comment = "Screen inactive" }
+    Invoke-Api -Requests @(@{ Name = "lockbreak"; Path = "/timers"; Method = "Post"; Body = $body }) -OnDone {
+        param($m)
+        $Script:ActionBusy = $false
+        $r = $m["lockbreak"]
+        $lb = $Script:LockBreak
+        if ($r -and $r.Ok -and $lb) {
+            $lb.Started = $true
+            if ($r.Data -and $r.Data.status -eq "active") { Apply-TimerData $r.Data $r.At }
+            Write-Log "Screen locked: break started (was on task $($lb.Id))"
+        }
+        Request-Poll -Force
+    }
+}
+
+function On-ScreenUnlock {
+    $Script:ScreenLocked = $false
+    $lb = $Script:LockBreak
+    $Script:LockBreak = $null
+    if (-not $lb -or -not $lb.Started) { return }
+    # decide on fresh data: the last poll may be from before a sleep
+    $lb.Expires = (Get-Date).AddMinutes(3)
+    $Script:LockResume = $lb
+    Request-Poll -Force
+}
+
+# Called after every successful poll.
+function Check-LockResume {
+    $lr = $Script:LockResume
+    if (-not $lr) { return }
+    if ((Get-Date) -gt $lr.Expires) { $Script:LockResume = $null; return }
+    if ($Script:ActionBusy) { return }
+    $Script:LockResume = $null
+    # only if the break we started is still running, and you're still on the clock
+    if (-not $Script:IsRunning -or $Script:TaskId -ne $lr.BreakId) { return }
+    if ((Test-ClockOn) -and $Script:ClockUsed -and $Script:ClockState -ne "in") { return }
+    Start-Timer $lr.Id $lr.Name $lr.Comment "Welcome back"
+}
+
+function Check-ScreenLock {
+    if (-not $Script:HasWinApi) { return }
+    try {
+        $ls = [EhLock]::LockSeq; $us = [EhLock]::UnlockSeq
+        if ($ls -ne $Script:LockSeqSeen) { $Script:LockSeqSeen = $ls; On-ScreenLock }
+        if ($us -ne $Script:UnlockSeqSeen) { $Script:UnlockSeqSeen = $us; On-ScreenUnlock }
+        if ($Script:ScreenLocked -and $Script:LockBreak) { Try-LockBreak }
+    } catch { }
+}
+
 # The time off counts from the later of: the timer stopping, clocking in.
 function Get-OffSince {
     $s = $Script:StoppedSince
@@ -1829,9 +1969,10 @@ $Script:UpdWorker = {
             Invoke-WebRequest -Uri $ZipUrl -OutFile $zip -UseBasicParsing -TimeoutSec 180
             $out = Join-Path $dir "files"
             Expand-Archive -Path $zip -DestinationPath $out -Force
-            $ps1 = Get-ChildItem $out -Recurse -Filter "EverhourWidget.ps1" | Select-Object -First 1
-            if (-not $ps1) { throw "the download has no EverhourWidget.ps1" }
-            $res.Data = $ps1.DirectoryName
+            # the repo's own top folder only - never a stray copy deeper inside
+            $top = @(Get-ChildItem $out -Directory)
+            if ($top.Count -ne 1 -or -not (Test-Path (Join-Path $top[0].FullName "EverhourWidget.ps1"))) { throw "the download has no EverhourWidget.ps1 at its top" }
+            $res.Data = $top[0].FullName
         }
         $res.Ok = $true
     } catch { $res.Error = $_.Exception.Message }
@@ -1891,17 +2032,46 @@ function On-UpdateDownloaded($r) {
     $src = [string]$r.Data
     $errs = $null; $tok = $null
     [void][System.Management.Automation.Language.Parser]::ParseFile((Join-Path $src "EverhourWidget.ps1"), [ref]$tok, [ref]$errs)
-    if ($errs.Count -gt 0) { Set-Toast "Update looks broken - skipped" 6 -IsError; Write-Log "Update skipped: downloaded script has $($errs.Count) parse errors"; return }
+    if ($errs.Count -gt 0) { Set-Toast "Update looks broken - skipped" 6 -IsError; Write-Log "Update skipped: downloaded script has $($errs.Count) parse errors"; Remove-UpdateTemp $src; return }
+    # the download must really be newer than what runs now (no silent downgrade)
+    $dv = $null
+    try { $vm = Select-String -Path (Join-Path $src "EverhourWidget.ps1") -Pattern '^\$Script:Version = "([\d.]+)"' | Select-Object -First 1; $dv = [version]$vm.Matches[0].Groups[1].Value } catch { }
+    if (-not $dv -or $dv -le [version]$Script:Version) {
+        Set-Toast "Update skipped" 6 -IsError; Write-Log "Update skipped: downloaded version '$dv' is not newer than $($Script:Version)"; Remove-UpdateTemp $src; return
+    }
     try {
         $ok = Copy-AppFiles $src $ScriptDir
         Get-ChildItem $ScriptDir -Recurse -File | Unblock-File -ErrorAction SilentlyContinue
         if (-not $ok) { throw "the widget script couldn't be replaced" }
-    } catch { Set-Toast "Update failed" 6 -IsError; Write-Log "Update copy failed: $($_.Exception.Message)"; return }
+    } catch { Set-Toast "Update failed" 6 -IsError; Write-Log "Update copy failed: $($_.Exception.Message)"; Remove-UpdateTemp $src; return }
     Write-Log "Updated from $($Script:Version) to $($Script:UpdateAvail.Version)"
+    Remove-UpdateTemp $src
     Restart-Widget
 }
+# the downloaded zip and its unpacked files (about 5 MB) - gone once used
+function Remove-UpdateTemp([string]$src) {
+    try {
+        $dir = $src
+        while ($dir -and (Split-Path $dir -Leaf) -notlike "everhour-widget-update-*") { $dir = Split-Path $dir -Parent }
+        $tempDir = (Get-Item $env:TEMP).FullName      # long form: %TEMP% may be an 8.3 short path
+        if ($dir -and (Split-Path $dir -Parent) -eq $tempDir) { Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue }
+    } catch { }
+}
+# leftovers from earlier versions, which never cleaned up
+function Clear-OldUpdateTemp {
+    try {
+        Get-ChildItem $env:TEMP -Directory -Filter "everhour-widget-update-*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+# Launchers written to %TEMP% get a fresh name each time; old ones are swept.
+function New-TempLauncher([string]$prefix) {
+    Get-ChildItem $env:TEMP -Filter "everhour-widget-*.vbs" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-5) } | Remove-Item -Force -ErrorAction SilentlyContinue
+    return (Join-Path $env:TEMP ("everhour-widget-$prefix-" + [guid]::NewGuid().ToString("N") + ".vbs"))
+}
 function Restart-Widget {
-    $tmp = Join-Path $env:TEMP "everhour-widget-restart.vbs"
+    $tmp = New-TempLauncher "restart"
     (Get-LauncherVbs $ScriptPath) | Set-Content -Path $tmp -Encoding ASCII
     try { $Script:Mutex.ReleaseMutex() } catch { }
     Start-Process wscript.exe -ArgumentList "`"$tmp`""
@@ -3987,7 +4157,9 @@ function Build-Page-connect($p) {
     } elseif (-not $RenderPreview) {
         try {
             $clip = [System.Windows.Forms.Clipboard]::GetText().Trim()
-            if ($clip -match '^[A-Za-z0-9\-_:.]{20,100}$') {
+            # only something shaped like an Everhour token (hex groups joined by
+            # dashes) - never a random password or another service's key
+            if ($clip -match '^[0-9a-fA-F]{4,}(-[0-9a-fA-F]{4,}){3,}$' -and $clip.Length -le 80) {
                 $kb.Text = $clip
                 $H.KeyStatus.ForeColor = $UI.Good
                 $H.KeyStatus.Text = "Found a token on your clipboard - press Connect."
@@ -4193,6 +4365,7 @@ function Build-Page-focusbreaks($p) {
     foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 40
     }
+    [void](Add-HubCtrl $p (New-HubToggle "Break when the screen locks" "BreakOnLock" 24 $y 352 "While clocked in; your task resumes on unlock")); $y += 54
     $y += 8
     [void](Add-HubCtrl $p (New-NavRow "Focus sessions" { "{0} min  |  {1} min break" -f $Script:Cfg.FocusMinutes, $Script:Cfg.FocusBreakMinutes } "focus" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min a day" -f $Script:Cfg.BreakLimitMinutes } "breaks" 24 $y)); $y += 52
@@ -4447,7 +4620,7 @@ $Script:AssetWorker = {
                 # same IPv6 trouble as the update check: retry with curl over IPv4
                 $curl = Join-Path $env:WINDIR "System32\curl.exe"
                 if (-not (Test-Path $curl)) { throw }
-                & $curl -4 -s -f -L -m 120 -o "$dst.part" ($Base + $f)
+                & $curl -4 -s -f -L --proto "=https" --proto-redir "=https" -m 120 -o "$dst.part" ($Base + $f)
                 if ($LASTEXITCODE -ne 0) { throw "curl exit $LASTEXITCODE" }
             }
             Move-Item "$dst.part" $dst -Force
@@ -5677,6 +5850,8 @@ $uiTimer.Add_Tick({
         if ($Script:HideTarget -eq 0) { $form.TopMost = [bool]$Script:Cfg.AlwaysOnTop }
     }
 
+    Check-ScreenLock
+    if ($Script:Cfg.BreakOnLock -and -not $Script:Cfg.BreakTaskId -and ($now - $Script:StartedAt).TotalSeconds -gt 15) { Find-BreakTask }
     Check-Focus
     if (($now - $Script:StartedAt).TotalSeconds -gt 20) { Ensure-Assets }
     # look for a new version 30 s after start, then every 6 hours
@@ -5750,6 +5925,8 @@ $form.Add_Shown({
     $uiTimer.Start()
     $secTimer.Start()
     $deskTimer.Start()
+    if ($Script:HasWinApi) { try { [EhLock]::Start() } catch { Write-Log "Lock watch failed: $($_.Exception.Message)" } }
+    if (-not $RenderPreview) { Clear-OldUpdateTemp }
     Update-AnimTimer
     # First run (or first run of a new version): the setup questions. They
     # open just after the widget appears, so every answer shows on it live.

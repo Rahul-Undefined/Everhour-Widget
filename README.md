@@ -45,6 +45,8 @@ The list on the widget has two groups, **Today** and **This week** — click a h
 
 If you use Everhour timecards, the widget clocks you in and out: the **Clock in / Clock out** button sits next to *Stop* (a gear takes Settings' place), and it's in the right-click menu too. Clocking out stops a running timer first. While you're clocked out the widget rests — no red, no "off for" counter — and once you clock in, the time off counts from that moment. Clock in from the Everhour website or app and the widget follows within about 15 seconds. Turn it off in Settings → Widget → *Clock in / clock out*.
 
+**Screen lock = break.** Lock the screen (Win+L, or Windows locking it) while you're clocked in and working, and the timer switches to your break task with the note *Screen inactive* — so exactly the locked time counts as break. Unlock and your task starts again, with its note. Clocked out, already on a break or no timer running: locking changes nothing. On accounts without timecards your work hours decide. The break task is the one you last used, or found by your break words; Settings → Focus and breaks → *Break when the screen locks*.
+
 <img src="docs/large-clockedout.png" alt="Clocked out" width="260">
 
 ## Focus sessions and favourites
