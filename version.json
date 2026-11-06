@@ -1,4 +1,4 @@
 {
-  "version": "9.1",
-  "notes": "Locking the screen while clocked in switches to your break task (note: Screen inactive) and resumes your task on unlock. Security tidy-ups: newer-only updates, temp files cleaned, tour fonts bundled."
+  "version": "9.2",
+  "notes": "Screen lock no longer breaks meetings, calls, training or other offline work (task name or note), or any live call using the microphone."
 }

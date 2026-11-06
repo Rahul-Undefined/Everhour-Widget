@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.1"
+$Script:Version = "9.2"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -652,6 +652,8 @@ $Script:Defaults = [ordered]@{
     ClockInOut          = $true   # Everhour timecards: clock in / out from the widget
     StayOnDesktop       = $true   # still showing after Win+D / Show desktop
     BreakOnLock         = $true   # screen locked while working: break task, back on unlock
+    # ...except work that goes on with the laptop locked or shut
+    LockKeepWords       = "meeting, call, sync, standup, stand-up, scrum, huddle, interview, training, workshop, webinar, presentation, demo, discussion, 1:1, one-on-one, client visit, site visit, offline"
 }
 
 $Script:Themes = [ordered]@{
@@ -726,6 +728,7 @@ function Normalize-Config {
     if (-not (Parse-HHmm $c.WorkEnd))   { $c.WorkEnd   = "18:30" }
     if ($null -eq $c.WorkDays) { $c.WorkDays = "Mon,Tue,Wed,Thu,Fri" }
     if ($null -eq $c.BreakKeywords) { $c.BreakKeywords = "break, lunch" }
+    if ($null -eq $c.LockKeepWords) { $c.LockKeepWords = $Script:Defaults.LockKeepWords }
     try { $c.FocusMinutes      = [int](Limit $c.FocusMinutes 5 180) }      catch { $c.FocusMinutes = 25 }
     try { $c.FocusBreakMinutes = [int](Limit $c.FocusBreakMinutes 0 60) }  catch { $c.FocusBreakMinutes = 5 }
     $c.Favorites = @(@($c.Favorites) | Where-Object { $_ -and $_.Id } | Select-Object -First 5 |
@@ -1682,12 +1685,45 @@ function Find-BreakTask {
     }
 }
 
+# Work that carries on with the screen locked: a meeting, a call, training,
+# a client visit... The task name or its note says so with one of the
+# "keep working" words (whole words, any case).
+function Test-KeepsWorking([string]$text) {
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    foreach ($w in (([string]$Script:Cfg.LockKeepWords) -split ",")) {
+        $w = $w.Trim()
+        if (-not $w) { continue }
+        # plurals too: meetings, calls, demos
+        if ([regex]::IsMatch($text, '(?<![\p{L}\p{N}])' + [regex]::Escape($w) + '(?:s|es)?(?![\p{L}\p{N}])', 'IgnoreCase')) { return $true }
+    }
+    return $false
+}
+
+# A call is going on: some app (Teams, Zoom, Meet in a browser...) is using
+# the microphone right now. Windows notes it per app; "stop" 0 = still on.
+function Test-MicInUse {
+    try {
+        $root = "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+        if (-not (Test-Path $root)) { return $false }
+        foreach ($k in @(Get-ChildItem $root -Recurse -ErrorAction SilentlyContinue)) {
+            $v = Get-ItemProperty $k.PSPath -ErrorAction SilentlyContinue
+            if ($v -and $null -ne $v.LastUsedTimeStart -and $null -ne $v.LastUsedTimeStop -and
+                [long]$v.LastUsedTimeStart -gt 0 -and [long]$v.LastUsedTimeStop -eq 0) { return $true }
+        }
+    } catch { }
+    return $false
+}
+
 function On-ScreenLock {
     $Script:ScreenLocked = $true
     $Script:LockResume = $null
     if (-not $Script:Cfg.BreakOnLock -or -not $Script:IsRunning -or $Script:LastError) { return }
     if (Test-IsBreak $Script:TaskName) { return }
     if (-not (Test-OnTheClock)) { return }
+    if ((Test-KeepsWorking $Script:TaskName) -or (Test-KeepsWorking ([string]$Script:TimerComment))) {
+        Write-Log "Screen locked: kept on '$($Script:TaskName)' (meeting / offline work)"; return
+    }
+    if (Test-MicInUse) { Write-Log "Screen locked: kept on the task (a call is using the microphone)"; return }
     $Script:LockBreak = @{ Id = $Script:TaskId; Name = $Script:TaskName; Comment = [string]$Script:TimerComment
                            BreakId = ""; BreakName = ""; Started = $false; TriedAt = [DateTime]::MinValue }
     Try-LockBreak
@@ -4257,6 +4293,12 @@ function Build-Page-breaks($p) {
     $tb.Add_TextChanged({ $Script:Cfg.BreakKeywords = $this.Text.Trim() })
     [void](Add-HubCtrl $p $tb)
     $y += 40
+    [void](Add-HubCtrl $p (New-Caps "Screen lock never breaks tasks with" 24 $y)); $y += 22
+    $tk = New-TextBox 24 $y 352 ([string]$Script:Cfg.LockKeepWords) "meeting, call, training"
+    $tk.Add_Leave({ $Script:Cfg.LockKeepWords = $this.Text.Trim(); Save-Config })
+    $tk.Add_TextChanged({ $Script:Cfg.LockKeepWords = $this.Text.Trim() })
+    [void](Add-HubCtrl $p $tk)
+    $y += 40
     [void](Add-HubCtrl $p (New-Caps "Daily break allowance" 24 $y)); $y += 22
     $ch = Add-HubCtrl $p (New-Chips @(@{ L = "30 min"; V = 30 }, @{ L = "45 min"; V = 45 }, @{ L = "1 hour"; V = 60 }, @{ L = "90 min"; V = 90 }) 24 $y 352 { [int]$Script:Cfg.BreakLimitMinutes } { param($v) Set-Cfg "BreakLimitMinutes" ([int][Math]::Min(600, $v)) } "min")
     $y = Below $ch
@@ -4365,7 +4407,7 @@ function Build-Page-focusbreaks($p) {
     foreach ($t in @(@("Smooth animations", "Animations"), @("Edge lights", "EdgeLights"), @("Turn red when no timer runs", "RedWhenStopped"))) {
         [void](Add-HubCtrl $p (New-HubToggle $t[0] $t[1] 24 $y)); $y += 40
     }
-    [void](Add-HubCtrl $p (New-HubToggle "Break when the screen locks" "BreakOnLock" 24 $y 352 "While clocked in; your task resumes on unlock")); $y += 54
+    [void](Add-HubCtrl $p (New-HubToggle "Break when the screen locks" "BreakOnLock" 24 $y 352 "Not during meetings or calls; resumes on unlock")); $y += 54
     $y += 8
     [void](Add-HubCtrl $p (New-NavRow "Focus sessions" { "{0} min  |  {1} min break" -f $Script:Cfg.FocusMinutes, $Script:Cfg.FocusBreakMinutes } "focus" 24 $y)); $y += 52
     [void](Add-HubCtrl $p (New-NavRow "Breaks" { "{0} min a day" -f $Script:Cfg.BreakLimitMinutes } "breaks" 24 $y)); $y += 52
