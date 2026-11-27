@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.3"
+$Script:Version = "9.4"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -2095,15 +2095,15 @@ function Check-Focus {
 # ===========================================================================
 function Show-NoteDialog {
     if (-not $Script:IsRunning) { return }
-    $d = New-Dialog "Note for this entry" 440 236
+    $d = New-Dialog "Comment on this entry" 440 236
     $f = $d.Form
     $f.Controls.Add((New-Label "What are you working on in '$($Script:TaskName)'?" 22 56 396 40 $FontUI $UI.Muted))
-    $tb = New-TextBox 22 100 396 ([string]$Script:TimerComment) "Add a note"
+    $tb = New-TextBox 22 100 396 ([string]$Script:TimerComment) "Add a comment"
     $f.Controls.Add($tb)
-    $f.Controls.Add((New-Label "Saved on today's entry. The timer keeps running." 22 136 396 20 $FontSmall $UI.Muted))
+    $f.Controls.Add((New-Label "Posted to Everhour on today's entry. The timer keeps running." 22 136 396 20 $FontSmall $UI.Muted))
     $Script:NoteBox = $tb; $Script:NoteOk = $false
-    $bc = New-FlatButton -Text "Cancel" -X 220 -Y 178 -W 92 -H 36
-    $bs = New-FlatButton -Text "Save note" -X 320 -Y 178 -W 98 -H 36 -Primary
+    $bc = New-FlatButton -Text "Cancel" -X 212 -Y 178 -W 92 -H 36
+    $bs = New-FlatButton -Text "Post comment" -X 312 -Y 178 -W 106 -H 36 -Primary
     $bc.Add_Click({ $this.FindForm().Close() })
     $bs.Add_Click({ $Script:NoteOk = $true; $this.FindForm().Close() })
     $f.Controls.Add($bc); $f.Controls.Add($bs); $f.AcceptButton = $bs
@@ -2114,7 +2114,7 @@ function Show-NoteDialog {
     if ($Script:NoteOk -and $Script:IsRunning) {
         # Everhour keeps the note with the timer it was started with, so restart
         # the same task with the new note; the time carries on in the same entry.
-        Start-Timer $Script:TaskId $Script:TaskName $note "Note saved"
+        Start-Timer $Script:TaskId $Script:TaskName $note "Comment posted"
     }
 }
 
@@ -3400,32 +3400,50 @@ function Build-Frame($Pal, [string]$Mode) {
     }
     Add-Hit "toggle" ($btnX + $M) ($btnY + $M) $btnD $btnD
 
-    # ---------- privacy eye ----------
-    $es = [single](Px 9)
-    if ($square) { $ex = $btnX - (Px 18); $eyc = $btnY + $btnD / 2; $capsRect[2] -= (Px 26) }
-    else { $ex = $W - (Px 20); $eyc = (Px 10) }
-    $hovE = ($Script:Hover -eq "eye")
-    if ($hovE) { Fill-Circle $g (A $Pal.Muted 60) $ex $eyc ($es * 1.25) }
-    Draw-Eye $g $(if ($cfg.PrivacyMode) { $Pal.Accent } elseif ($hovE) { $Pal.Task } else { $Pal.Muted }) $ex $eyc $es ([bool]$cfg.PrivacyMode)
-    Add-Hit "eye" ($ex - $es * 1.3 + $M) ($eyc - $es * 1.3 + $M) ($es * 2.6) ($es * 2.6)
-
-    # ---------- microphone: voice commands ----------
-    if ($cfg.VoiceEnabled) {
-        $mx = $ex - (Px 24)
-        if ($square) { $capsRect[2] -= (Px 24) }
-        $listening = ($Script:VoiceSince -gt [DateTime]::MinValue -and ("EhVoice" -as [type]) -and [EhVoice]::State -eq "listening")
-        $hovM = ($Script:Hover -eq "mic")
-        if ($listening) {
-            $lp = 0.5 + 0.5 * [Math]::Sin(((Get-Date) - $Script:VoiceSince).TotalSeconds * 2 * [Math]::PI / 1.1)
-            Fill-Circle $g (A $Pal.Accent ([int](60 + 70 * $lp))) $mx $eyc ($es * (1.35 + 0.25 * $lp))
-            Fill-Circle $g $Pal.Accent $mx $eyc ($es * 1.15)
-            Draw-Mic $g $Pal.Bg1 $mx $eyc $es
-        } else {
-            if ($hovM) { Fill-Circle $g (A $Pal.Muted 60) $mx $eyc ($es * 1.25) }
-            Draw-Mic $g $(if ($hovM) { $Pal.Task } else { $Pal.Muted }) $mx $eyc $es
+    # ---------- quick controls: mic + privacy eye in one pill ----------
+    # Grouped in a soft capsule inside the content area - well clear of the
+    # edge lights - so they read as one small control, not loose glyphs.
+    # Large / Square: in the top row, left of the round button.
+    # Wide: at the right end of the task line.
+    $slots = @()
+    if ($Script:IsRunning) { $slots += "note" }        # comment on the running entry
+    if ($cfg.VoiceEnabled) { $slots += "mic" }
+    $slots += "eye"
+    $slotW = [single](Px 26); $pillH = [single](Px 22); $pPad = [single](Px 2)
+    $pillW = $slots.Count * $slotW + 2 * $pPad
+    if ($square) { $pillR = $btnX - (Px 8); $pcy = $btnY + $btnD / 2 }
+    else { $pillR = $line1[0] + $line1[2]; $pcy = $line1[1] + $hT / 2 }
+    $pillX = $pillR - $pillW; $pillY = $pcy - $pillH / 2
+    $listening = ($cfg.VoiceEnabled -and $Script:VoiceSince -gt [DateTime]::MinValue -and ("EhVoice" -as [type]) -and [EhVoice]::State -eq "listening")
+    Fill-Round $g (A $Pal.Muted $(if ($listening) { 60 } else { 34 })) $pillX $pillY $pillW $pillH ($pillH / 2)
+    $es = [single](Px 7)
+    for ($si = 0; $si -lt $slots.Count; $si++) {
+        $nm = $slots[$si]
+        $sx = $pillX + $pPad + $si * $slotW + $slotW / 2
+        $hov = ($Script:Hover -eq $nm)
+        if ($si -gt 0) {     # hairline between the two
+            $dp = New-Object System.Drawing.Pen((A $Pal.Muted 60), 1)
+            $g.DrawLine($dp, ($sx - $slotW / 2), ($pillY + (Px 6)), ($sx - $slotW / 2), ($pillY + $pillH - (Px 6))); $dp.Dispose()
         }
-        Add-Hit "mic" ($mx - $es * 1.3 + $M) ($eyc - $es * 1.3 + $M) ($es * 2.6) ($es * 2.6)
+        if ($nm -eq "mic" -and $listening) {
+            $lp = 0.5 + 0.5 * [Math]::Sin(((Get-Date) - $Script:VoiceSince).TotalSeconds * 2 * [Math]::PI / 1.1)
+            Fill-Circle $g (A $Pal.Accent ([int](70 + 80 * $lp))) $sx $pcy ($pillH / 2 + (Px 2) * $lp)
+            Fill-Circle $g $Pal.Accent $sx $pcy ($pillH / 2 - (Px 2))
+            Draw-Mic $g $Pal.Bg1 $sx $pcy $es
+        } else {
+            if ($hov) { Fill-Circle $g (A $Pal.Muted 80) $sx $pcy ($pillH / 2 - (Px 2)) }
+            $ic = if ($nm -eq "eye" -and $cfg.PrivacyMode) { $Pal.Accent } elseif ($hov) { $Pal.Time } else { $Pal.Task }
+            if ($nm -eq "note") {
+                # filled bubble = this entry already has a comment
+                $has = -not [string]::IsNullOrWhiteSpace([string]$Script:TimerComment)
+                Draw-Bubble $g $(if ($has -and -not $hov) { $Pal.Accent } else { $ic }) $sx $pcy $es $has
+            }
+            elseif ($nm -eq "mic") { Draw-Mic $g $ic $sx $pcy $es } else { Draw-Eye $g $ic $sx $pcy $es ([bool]$cfg.PrivacyMode) }
+        }
+        Add-Hit $nm ($sx - $slotW / 2 + $M) ($pillY + $M) $slotW $pillH
     }
+    if ($square) { $capsRect[2] = [single][Math]::Max(0, $pillX - (Px 8) - $capsRect[0]) }
+    $quickLeft = $pillX
 
     # ---------- status chip ----------
     $chip = ""; $chipC = $Pal.Error; $chipHit = ""
@@ -3441,6 +3459,14 @@ function Build-Frame($Pal, [string]$Mode) {
     # ---------- texts ----------
     $l1 = ""; $l1C = $Pal.Task; $l1F = $F.Task
     if ($hovBtn -and $Script:LastError -eq "AUTH") { $l1 = "Click to enter your API token"; $l1C = $Pal.Error }
+    # hovering a quick control: the task line says what it does
+    elseif ($Script:Hover -eq "note") {
+        $cm = [string]$Script:TimerComment
+        $l1 = if ($cm.Trim()) { "Comment: " + $(if ($cfg.PrivacyMode) { Hide-Name $cm } else { $cm }) } else { "Add a comment to this entry" }
+        $l1C = $Pal.Accent
+    }
+    elseif ($Script:Hover -eq "mic") { $l1 = "Voice - say start break, clock out..."; $l1C = $Pal.Accent }
+    elseif ($Script:Hover -eq "eye") { $l1 = if ($cfg.PrivacyMode) { "Show names and times" } else { "Hide names and times" }; $l1C = $Pal.Accent }
     elseif ($hovBtn -and $Script:IsRunning) { $l1 = "Stop timer"; $l1C = $Pal.Accent }
     elseif ($hovBtn -and $Mode -eq "clockedout") { $l1 = "Clock in"; $l1C = $Pal.Accent }
     elseif ($hovBtn) {
@@ -3488,7 +3514,9 @@ function Build-Frame($Pal, [string]$Mode) {
                 Draw-Text $g $chip $F.SmallBold $chipC $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
             }
         } else {
-            Draw-Text $g $caps $F.Caps $Pal.Muted $cxp $capsRect[1] ($capsRect[0] + $capsRect[2] - $cxp) $capsRect[3] "Left"
+            # a label cut to "TRACKI..." looks broken: if it doesn't fit, the status dot speaks alone
+            $capW = $capsRect[0] + $capsRect[2] - $cxp
+            if ((Measure-W $caps $F.Caps) -le $capW) { Draw-Text $g $caps $F.Caps $Pal.Muted $cxp $capsRect[1] $capW $capsRect[3] "Left" }
         }
         if ($stoppedShow -and -not $hovBtn) { $l1 = Hide-Num ("Off since " + $offSince.ToString("h:mm tt")) }
         Draw-Text $g $l1 $l1F $l1C $line1[0] $line1[1] $line1[2] $line1[3] "Left"
@@ -3507,7 +3535,7 @@ function Build-Frame($Pal, [string]$Mode) {
             Draw-Text $g $suffix $F.Small $Pal.Muted ($P + $mw) $todayY ($W - 2 * $P - $mw) $hS "Left"
         }
     } else {
-        $lineR = $line1[0] + $line1[2]
+        $lineR = $quickLeft - (Px 8)       # task name and chip stop before the control pill
         if ($chip) {
             $cw = (Measure-W $chip $F.Small) + (Px 10)
             $ch = $hS + (Px 2)
@@ -3725,6 +3753,23 @@ function Hide-Name([string]$s) {
 function Hide-Num([string]$s) {
     if (-not $Script:Cfg.PrivacyMode -or [string]::IsNullOrEmpty($s)) { return $s }
     return ($s -replace '\d', [string][char]0x2022)
+}
+function Draw-Bubble($g, $color, [single]$cx, [single]$cy, [single]$s, [bool]$filled) {
+    $w = $s * 1.9; $h = $s * 1.4
+    $x = $cx - $w / 2; $y = $cy - $h / 2 - $s * 0.15
+    $p = New-RoundPath $x $y $w $h ($s * 0.45)
+    $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.3, $s * 0.17))
+    $pen.LineJoin = "Round"
+    # the little tail, bottom-left
+    $tail = [System.Drawing.PointF[]]@((New-Object System.Drawing.PointF(($x + $w * 0.28), ($y + $h - 0.5))),
+        (New-Object System.Drawing.PointF(($x + $w * 0.2), ($y + $h + $s * 0.45))),
+        (New-Object System.Drawing.PointF(($x + $w * 0.5), ($y + $h - 0.5))))
+    if ($filled) {
+        $b = New-Object System.Drawing.SolidBrush($color); $g.FillPath($b, $p); $g.FillPolygon($b, $tail); $b.Dispose()
+    } else {
+        $g.DrawPath($pen, $p); $g.DrawLines($pen, $tail)
+    }
+    $pen.Dispose(); $p.Dispose()
 }
 function Draw-Mic($g, $color, [single]$cx, [single]$cy, [single]$s) {
     $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.3, $s * 0.16))
@@ -5863,7 +5908,7 @@ $miFavs     = New-Object System.Windows.Forms.ToolStripMenuItem("Favourites")
 $miFocus    = New-Object System.Windows.Forms.ToolStripMenuItem("Focus")
 [void]$menu.Items.Add($miFavs); [void]$menu.Items.Add($miFocus)
 $menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator)) | Out-Null
-$miNote     = $menu.Items.Add("Edit note...")
+$miNote     = $menu.Items.Add("Comment...")
 $miAddTime  = $menu.Items.Add("Add missed time...")
 $miPrivacy  = $menu.Items.Add("Hide names and times")
 $miPrivacy.Add_Click({ Toggle-Cfg "PrivacyMode" })
@@ -6046,6 +6091,7 @@ $form.Add_MouseUp({
         "b_settings" { Show-Settings }
         "b_clock"    { Toggle-Clock }
         "mic"        { Start-Voice }
+        "note"       { Show-NoteDialog }
         default      { if ($Script:Cfg.Shape -ne "Large") { Set-Expanded (-not $Script:IsExpanded) } }
     }
 })
@@ -6407,6 +6453,25 @@ if ($RenderPreview) {
     Save-Preview "large-clockedin-stopped"
     Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120; Save-Preview "large-clockedin-running"
     $Script:IsRunning = $false; $Script:TaskId = ""; $Script:ClockState = ""; $Script:ClockUsed = $false
+    # the quick-control pill (comment, mic, eye) in every shape, mode and a few themes
+    $keep = @{}; foreach ($k in $Script:Themes["Graphite"].Keys) { $keep[$k] = $Script:Cfg[$k] }
+    foreach ($th in @("Graphite", "Light", "Ocean")) {
+        foreach ($k in $Script:Themes[$th].Keys) { $Script:Cfg[$k] = $Script:Themes[$th][$k] }
+        foreach ($shape in @("Large", "Square", "Wide")) {
+            $Script:Cfg.Shape = $shape; Apply-Theme
+            Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120; $Script:TimerComment = "design review"
+            Save-Preview "pill-$($th.ToLower())-$($shape.ToLower())-work"
+            Set-Run "ev:3" "Break Time" 900 1500; $Script:TimerComment = ""
+            Save-Preview "pill-$($th.ToLower())-$($shape.ToLower())-break"
+            $Script:IsRunning = $false; $Script:TaskId = ""; $Script:StoppedSince = (Get-Date).AddMinutes(-23)
+            Save-Preview "pill-$($th.ToLower())-$($shape.ToLower())-stopped"
+        }
+    }
+    foreach ($k in $keep.Keys) { $Script:Cfg[$k] = $keep[$k] }
+    $Script:Cfg.Shape = "Large"; Apply-Theme
+    Set-Run "ev:1" "Q4 dashboard redesign" 4935 6120; $Script:TimerComment = "design review"
+    foreach ($h in @("note", "mic", "eye")) { $Script:Hover = $h; Save-Preview "pill-hover-$h" }
+    $Script:Hover = ""; $Script:TimerComment = ""; $Script:IsRunning = $false; $Script:TaskId = ""
     # add-missed-time picker
     $pt = New-Object System.Windows.Forms.Timer
     $pt.Interval = 4500

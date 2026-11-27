@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v9.3)
+EVERHOUR DESKTOP WIDGET  (v9.4)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
@@ -60,6 +60,8 @@ USING IT
   Ctrl+Alt+E         start / stop from anywhere (change it in Settings)
   Win+R, Everhour    opens the widget / brings it to the front
   Win+D              the widget stays on the desktop (Settings -> Widget)
+  Speech bubble      comment on the running entry - posted to Everhour
+                     (filled = it already has one; hover to read it)
   Ctrl+Alt+V / mic   voice: say "start break", "back to work", "clock in",
                      "clock out", "stop timer", "start timer" or
                      "start <favourite task>". Offline; the mic is on only

@@ -1,4 +1,4 @@
 {
-  "version": "9.3",
-  "notes": "Voice commands: click the mic or press Ctrl+Alt+V and say start break, back to work, clock in, clock out, stop timer or start timer. Offline, listens only when you ask."
+  "version": "9.4",
+  "notes": "Voice commands (mic or Ctrl+Alt+V: start break, back to work, clock in, clock out). Comment on the running entry straight from the widget - posted to Everhour. Comment, mic and privacy now sit in one tidy pill, clear of the edge lights in every shape."
 }

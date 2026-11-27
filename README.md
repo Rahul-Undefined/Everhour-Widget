@@ -56,7 +56,7 @@ If you use Everhour timecards, the widget clocks you in and out: the **Clock in 
 - **Focus sessions** — 25 / 45 / 50 minutes (or your own). The edge lights count down; at the end you get a chime and a break, and the widget can switch to your break task and back for you.
 - **Favourite tasks** — star up to 5 tasks in the task picker. They show as one-click **Quick switch** chips on the widget and in the right-click menu.
 - **Sounds** — soft chimes for start, stop, focus and breaks, and an alert when a break runs over (Settings → Sounds).
-- **Edit note** — right-click → *Edit note...* changes the note on the running entry without stopping your time.
+- **Comment** — the speech bubble on the widget (or right-click → *Comment...*) changes the comment on the running entry without stopping your time.
 - **Add missed time** — right-click → *Add missed time...*: pick a task, a day and how long; it's added to Everhour without starting a timer.
 
 <br clear="right">
@@ -69,6 +69,7 @@ If you use Everhour timecards, the widget clocks you in and out: the **Clock in 
 - **Automatic updates** — checks GitHub every few hours and installs a new version with one click
 - **Global shortcut** — `Ctrl+Alt+E` starts or stops the timer from anywhere
 - **Win+R → `Everhour`** — opens the widget, or brings it to the front if it's already running
+- **Comment from the widget** — the speech bubble next to the mic adds or changes the comment on the running entry, posted to Everhour (filled when there is one; hover to read it)
 - **Voice commands** — click the mic on the widget or press `Ctrl+Alt+V` and say *start break*, *back to work*, *clock in*, *clock out*, *stop timer*, *start timer* or *start &lt;favourite task&gt;*. Uses the speech recogniser built into Windows, offline; the microphone is on only for five seconds after you ask (Settings → Advanced)
 - **Stays on Show desktop** — Win+D or the taskbar corner don't hide it (Settings → Widget)
 - **Real-time timer** — synced to Everhour's clock (network delay is taken out), refreshed every 10 s by default
