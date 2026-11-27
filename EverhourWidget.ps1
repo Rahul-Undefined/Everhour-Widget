@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.2"
+$Script:Version = "9.3"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -652,6 +652,8 @@ $Script:Defaults = [ordered]@{
     ClockInOut          = $true   # Everhour timecards: clock in / out from the widget
     StayOnDesktop       = $true   # still showing after Win+D / Show desktop
     BreakOnLock         = $true   # screen locked while working: break task, back on unlock
+    VoiceEnabled        = $true   # mic on the widget + shortcut: spoken commands
+    VoiceHotkey         = "Ctrl+Alt+V"
     # ...except work that goes on with the laptop locked or shut
     LockKeepWords       = "meeting, call, sync, standup, stand-up, scrum, huddle, interview, training, workshop, webinar, presentation, demo, discussion, 1:1, one-on-one, client visit, site visit, offline"
 }
@@ -729,6 +731,7 @@ function Normalize-Config {
     if ($null -eq $c.WorkDays) { $c.WorkDays = "Mon,Tue,Wed,Thu,Fri" }
     if ($null -eq $c.BreakKeywords) { $c.BreakKeywords = "break, lunch" }
     if ($null -eq $c.LockKeepWords) { $c.LockKeepWords = $Script:Defaults.LockKeepWords }
+    if ([string]::IsNullOrWhiteSpace([string]$c.VoiceHotkey)) { $c.VoiceHotkey = $Script:Defaults.VoiceHotkey }
     try { $c.FocusMinutes      = [int](Limit $c.FocusMinutes 5 180) }      catch { $c.FocusMinutes = 25 }
     try { $c.FocusBreakMinutes = [int](Limit $c.FocusBreakMinutes 0 60) }  catch { $c.FocusBreakMinutes = 5 }
     $c.Favorites = @(@($c.Favorites) | Where-Object { $_ -and $_.Id } | Select-Object -First 5 |
@@ -1324,6 +1327,8 @@ function Apply-TimerData($d, $at) {
             $Script:Cfg.LastTaskName = $Script:TaskName
             Save-Config
         }
+        # the work you were on: "back to work" by voice returns here
+        if (-not (Test-IsBreak $Script:TaskName)) { $Script:LastWork = @{ Id = $Script:TaskId; Name = $Script:TaskName; Comment = [string]$Script:TimerComment } }
         # remember the break task, so focus sessions can switch to it for you
         if ((Test-IsBreak $Script:TaskName) -and $Script:Cfg.BreakTaskId -ne $Script:TaskId) {
             $Script:Cfg.BreakTaskId = $Script:TaskId
@@ -1608,9 +1613,9 @@ function Clock-In {
     }
 }
 
-function Clock-Out {
+function Clock-Out([switch]$NoConfirm) {
     if ($Script:ClockBusy -or -not $Script:UserId) { return }
-    if ($Script:IsRunning) {
+    if ($Script:IsRunning -and -not $NoConfirm) {     # said out loud already counts as sure
         if (-not (Show-Message "Clock out?" "This stops '$($Script:TaskName)' and clocks you out for the day." "Clock out" "Cancel")) { return }
     }
     $Script:ClockBusy = $true
@@ -1785,6 +1790,188 @@ function Check-ScreenLock {
         if ($us -ne $Script:UnlockSeqSeen) { $Script:UnlockSeqSeen = $us; On-ScreenUnlock }
         if ($Script:ScreenLocked -and $Script:LockBreak) { Try-LockBreak }
     } catch { }
+}
+
+# ===========================================================================
+#  VOICE COMMANDS
+#  Click the mic on the widget (or press the voice shortcut, Ctrl+Alt+V) and
+#  say a command: "start break", "back to work", "clock in", "clock out",
+#  "stop timer", "start timer", or "start <favourite task>". It uses the
+#  offline speech recogniser built into Windows and listens only for these
+#  phrases, for a few seconds, only after you ask - nothing leaves the PC.
+#  The C# part is compiled on first use (needs System.Speech).
+# ===========================================================================
+$Script:VoiceSrc = @"
+using System;
+using System.Globalization;
+using System.Speech.Recognition;
+
+public static class EhVoice {
+    static SpeechRecognitionEngine eng;
+    static string loadedKey = "";
+    public static volatile string State = "idle";      // idle, listening, done, error
+    public static string Text = "", Error = "", Culture = "";
+    public static float Confidence = 0;
+
+    static RecognizerInfo Pick() {
+        RecognizerInfo best = null;
+        string[] prefer = { "en-IN", "en-US", "en-GB" };
+        foreach (string c in prefer) {
+            foreach (RecognizerInfo r in SpeechRecognitionEngine.InstalledRecognizers()) {
+                if (r.Culture.Name.Equals(c, StringComparison.OrdinalIgnoreCase)) { return r; }
+            }
+        }
+        foreach (RecognizerInfo r in SpeechRecognitionEngine.InstalledRecognizers()) {
+            if (best == null || r.Culture.TwoLetterISOLanguageName == "en") { best = r; }
+        }
+        return best;
+    }
+    public static bool Available() { try { return Pick() != null; } catch { return false; } }
+
+    public static void Listen(string[] phrases, double seconds) {
+        if (State == "listening") { return; }
+        Text = ""; Error = ""; Confidence = 0;
+        try {
+            if (eng == null) {
+                RecognizerInfo ri = Pick();
+                if (ri == null) { throw new InvalidOperationException("No speech recogniser is installed in Windows."); }
+                eng = new SpeechRecognitionEngine(ri);
+                Culture = ri.Culture.Name;
+                eng.RecognizeCompleted += Done;
+            }
+            string key = string.Join("|", phrases);
+            if (key != loadedKey) {
+                eng.UnloadAllGrammars();
+                GrammarBuilder gb = new GrammarBuilder(new Choices(phrases));
+                gb.Culture = eng.RecognizerInfo.Culture;
+                eng.LoadGrammar(new Grammar(gb));
+                loadedKey = key;
+            }
+            eng.SetInputToDefaultAudioDevice();          // follows a headset plugged in later
+            eng.InitialSilenceTimeout = TimeSpan.FromSeconds(seconds);
+            eng.BabbleTimeout = TimeSpan.FromSeconds(seconds);
+            eng.EndSilenceTimeout = TimeSpan.FromMilliseconds(450);
+            State = "listening";
+            eng.RecognizeAsync(RecognizeMode.Single);
+        } catch (Exception ex) { Error = ex.Message; State = "error"; }
+    }
+    static void Done(object s, RecognizeCompletedEventArgs e) {
+        try { eng.SetInputToNull(); } catch { }           // let go of the microphone at once
+        if (e.Error != null) { Error = e.Error.Message; State = "error"; return; }
+        if (e.Result != null) { Text = e.Result.Text; Confidence = e.Result.Confidence; }
+        State = "done";
+    }
+    public static void Cancel() { try { if (eng != null && State == "listening") { eng.RecognizeAsyncCancel(); } } catch { } }
+    public static void Reset() { State = "idle"; }
+}
+"@
+
+$Script:VoiceReady = $null        # $null = not tried yet, $true / $false after
+$Script:VoiceMap   = @{}          # spoken phrase -> command
+$Script:VoiceSince = [DateTime]::MinValue
+$Script:LastWork   = $null        # the last non-break task: "back to work" goes there
+
+function Import-Voice {
+    if ($null -ne $Script:VoiceReady) { return $Script:VoiceReady }
+    $Script:VoiceReady = $false
+    try {
+        if (-not ("EhVoice" -as [type])) {
+            $sha = [Security.Cryptography.SHA1]::Create()
+            $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Script:VoiceSrc + $PSVersionTable.CLRVersion))) -replace "-", "").Substring(0, 12)
+            $dll = Join-Path $ConfigDir "EhVoice-$hash.dll"
+            if (-not (Test-Path $dll)) {
+                Add-Type -TypeDefinition $Script:VoiceSrc -ReferencedAssemblies System.Speech -OutputAssembly $dll -OutputType Library -ErrorAction Stop
+                Get-ChildItem $ConfigDir -Filter "EhVoice-*.dll" | Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+            Add-Type -Path $dll -ErrorAction Stop
+        }
+        $Script:VoiceReady = [bool][EhVoice]::Available()
+        if (-not $Script:VoiceReady) { Write-Log "Voice: no speech recogniser installed" }
+    } catch { Write-Log "Voice unavailable: $($_.Exception.Message)" }
+    return $Script:VoiceReady
+}
+
+# Every phrase the recogniser may hear, and what it means.
+function Get-VoicePhrases {
+    $m = [ordered]@{}
+    foreach ($p in @("start break", "start a break", "start my break", "take a break", "break time", "go on break", "going on break", "on break", "lunch break", "start lunch")) { $m[$p] = "break" }
+    foreach ($p in @("stop break", "end break", "end my break", "break over", "back to work", "i am back", "i'm back", "resume work")) { $m[$p] = "endbreak" }
+    foreach ($p in @("clock in", "clock me in", "punch in", "start my day")) { $m[$p] = "clockin" }
+    foreach ($p in @("clock out", "clock me out", "punch out", "end my day")) { $m[$p] = "clockout" }
+    foreach ($p in @("stop timer", "stop the timer", "pause timer", "stop tracking")) { $m[$p] = "stop" }
+    foreach ($p in @("start timer", "start the timer", "resume timer", "start tracking", "resume")) { $m[$p] = "start" }
+    foreach ($p in @("cancel", "never mind", "nothing")) { $m[$p] = "cancel" }
+    $favs = @(Get-Favs)
+    for ($i = 0; $i -lt $favs.Count; $i++) {
+        $n = (([string]$favs[$i].Name) -replace '[^\p{L}\p{N} ]', ' ' -replace '\s+', ' ').Trim().ToLower()
+        if ($n.Length -lt 2 -or $n -match '\d') { continue }     # digits trip up the grammar
+        foreach ($p in @("start $n", "switch to $n")) { if (-not $m.Contains($p)) { $m[$p] = "fav:$i" } }
+    }
+    return $m
+}
+
+function Start-Voice {
+    if (-not $Script:Cfg.VoiceEnabled) { Set-Toast "Voice is off in Settings" 3; return }
+    if (-not (Import-Voice)) { Set-Toast "Voice isn't available on this PC" 5 -IsError; return }
+    if ([EhVoice]::State -eq "listening") { [EhVoice]::Cancel(); return }      # second press: stop listening
+    $Script:VoiceMap = Get-VoicePhrases
+    [EhVoice]::Listen([string[]]@($Script:VoiceMap.Keys), 5)
+    if ([EhVoice]::State -eq "error") {
+        Write-Log "Voice: $([EhVoice]::Error)"
+        Set-Toast "Microphone not available" 5 -IsError; [EhVoice]::Reset(); return
+    }
+    $Script:VoiceSince = Get-Date
+    Play-Sound "soft"
+    Set-Toast "Listening..." 8
+    Show-FromHide
+    $voiceTimer.Start()
+}
+
+$voiceTimer = New-Object System.Windows.Forms.Timer
+$voiceTimer.Interval = 100
+$voiceTimer.Add_Tick({
+    if (-not ("EhVoice" -as [type])) { $this.Stop(); return }
+    $st = [EhVoice]::State
+    if ($st -eq "listening") {
+        if (((Get-Date) - $Script:VoiceSince).TotalSeconds -gt 12) { [EhVoice]::Cancel() }   # safety net
+        Render; return
+    }
+    $this.Stop()
+    $text = [string][EhVoice]::Text; $conf = [double][EhVoice]::Confidence; $err = [string][EhVoice]::Error
+    [EhVoice]::Reset()
+    if ($st -eq "error") { Write-Log "Voice: $err"; Set-Toast "Microphone not available" 5 -IsError; return }
+    if (-not $text) { Set-Toast "Didn't hear a command" 3; return }
+    $cmd = [string]$Script:VoiceMap[$text]
+    # clocking out needs a clearer word than the rest
+    $need = if ($cmd -eq "clockout") { 0.7 } else { 0.5 }
+    if ($conf -lt $need) { Set-Toast "Didn't catch that - try again" 3; Write-Log ("Voice: heard '{0}' at {1:N2}, too unsure" -f $text, $conf); return }
+    Invoke-VoiceCommand $cmd $text
+})
+
+function Invoke-VoiceCommand([string]$cmd, [string]$heard) {
+    switch -Wildcard ($cmd) {
+        "break" {
+            if ($Script:IsRunning -and (Test-IsBreak $Script:TaskName)) { Set-Toast "Already on a break" 3; return }
+            if (-not $Script:Cfg.BreakTaskId) { Find-BreakTask; Set-Toast "No break task yet - start it once by hand" 5 -IsError; return }
+            Start-Timer $Script:Cfg.BreakTaskId $Script:Cfg.BreakTaskName "" "Break started"
+        }
+        "endbreak" {
+            $w = $Script:LastWork
+            if (-not ($Script:IsRunning -and (Test-IsBreak $Script:TaskName)) -and $Script:IsRunning) { Set-Toast "You're not on a break" 3; return }
+            if ($w -and $w.Id) { Start-Timer $w.Id $w.Name $w.Comment "Back to work" }
+            else { Show-TaskPicker }
+        }
+        "clockin"  { if ($Script:ClockState -eq "in") { Set-Toast "Already clocked in" 3 } else { Clock-In } }
+        "clockout" { if ($Script:ClockState -eq "out") { Set-Toast "Already clocked out" 3 } else { Clock-Out -NoConfirm } }
+        "stop"     { if ($Script:IsRunning) { Stop-Timer } else { Set-Toast "No timer running" 3 } }
+        "start" {
+            if ($Script:IsRunning) { Set-Toast "Timer already running" 3; return }
+            $w = $Script:LastWork
+            if ($w -and $w.Id) { Start-Timer $w.Id $w.Name $w.Comment "Started" } else { Resume-LastTask }
+        }
+        "fav:*"    { Start-Fav ([int]$cmd.Substring(4)) }
+        default    { Set-Toast "OK - nothing done" 2 }
+    }
 }
 
 # The time off counts from the later of: the timer stopping, clocking in.
@@ -3222,6 +3409,24 @@ function Build-Frame($Pal, [string]$Mode) {
     Draw-Eye $g $(if ($cfg.PrivacyMode) { $Pal.Accent } elseif ($hovE) { $Pal.Task } else { $Pal.Muted }) $ex $eyc $es ([bool]$cfg.PrivacyMode)
     Add-Hit "eye" ($ex - $es * 1.3 + $M) ($eyc - $es * 1.3 + $M) ($es * 2.6) ($es * 2.6)
 
+    # ---------- microphone: voice commands ----------
+    if ($cfg.VoiceEnabled) {
+        $mx = $ex - (Px 24)
+        if ($square) { $capsRect[2] -= (Px 24) }
+        $listening = ($Script:VoiceSince -gt [DateTime]::MinValue -and ("EhVoice" -as [type]) -and [EhVoice]::State -eq "listening")
+        $hovM = ($Script:Hover -eq "mic")
+        if ($listening) {
+            $lp = 0.5 + 0.5 * [Math]::Sin(((Get-Date) - $Script:VoiceSince).TotalSeconds * 2 * [Math]::PI / 1.1)
+            Fill-Circle $g (A $Pal.Accent ([int](60 + 70 * $lp))) $mx $eyc ($es * (1.35 + 0.25 * $lp))
+            Fill-Circle $g $Pal.Accent $mx $eyc ($es * 1.15)
+            Draw-Mic $g $Pal.Bg1 $mx $eyc $es
+        } else {
+            if ($hovM) { Fill-Circle $g (A $Pal.Muted 60) $mx $eyc ($es * 1.25) }
+            Draw-Mic $g $(if ($hovM) { $Pal.Task } else { $Pal.Muted }) $mx $eyc $es
+        }
+        Add-Hit "mic" ($mx - $es * 1.3 + $M) ($eyc - $es * 1.3 + $M) ($es * 2.6) ($es * 2.6)
+    }
+
     # ---------- status chip ----------
     $chip = ""; $chipC = $Pal.Error; $chipHit = ""
     if ($Script:Toast -and $now -lt $Script:ToastUntil) {
@@ -3521,6 +3726,16 @@ function Hide-Num([string]$s) {
     if (-not $Script:Cfg.PrivacyMode -or [string]::IsNullOrEmpty($s)) { return $s }
     return ($s -replace '\d', [string][char]0x2022)
 }
+function Draw-Mic($g, $color, [single]$cx, [single]$cy, [single]$s) {
+    $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.3, $s * 0.16))
+    $pen.StartCap = "Round"; $pen.EndCap = "Round"
+    $cw = $s * 0.62; $ch = $s * 1.05
+    $cap = New-RoundPath ($cx - $cw / 2) ($cy - $s * 0.95) $cw $ch ($cw / 2)
+    $b = New-Object System.Drawing.SolidBrush($color); $g.FillPath($b, $cap); $b.Dispose(); $cap.Dispose()
+    $g.DrawArc($pen, ($cx - $s * 0.62), ($cy - $s * 0.55), ($s * 1.24), ($s * 1.05), 0, 180)
+    $g.DrawLine($pen, $cx, ($cy + $s * 0.5), $cx, ($cy + $s * 0.85))
+    $pen.Dispose()
+}
 function Draw-Gear($g, $color, [single]$cx, [single]$cy, [single]$s) {
     $pen = New-Object System.Drawing.Pen($color, [single][Math]::Max(1.4, $s * 0.42))
     $pen.StartCap = "Round"; $pen.EndCap = "Round"
@@ -3703,7 +3918,7 @@ function Toggle-Cfg([string]$key) {
         return
     }
     Set-Cfg $key (-not [bool]$Script:Cfg[$key])
-    if ($key -eq "HotkeyEnabled") { Register-Hotkey }
+    if ($key -eq "HotkeyEnabled" -or $key -eq "VoiceEnabled") { Register-Hotkey }
     if ($key -eq "AutoHide" -and -not $Script:Cfg.AutoHide) { Show-FromHide }
     if ($key -eq "ClockInOut") { $Script:ClockAt = [DateTime]::MinValue; if ($Script:Cfg.ClockInOut) { Request-Poll -Force } else { Render } }
 }
@@ -4784,7 +4999,30 @@ function Build-Page-advanced($p) {
     [void](Add-HubCtrl $p $hot); $y += 34
     $msg = if ($Script:HotkeyStatus) { $Script:HotkeyStatus } else { "Click the box and press the keys you want, e.g. Ctrl+Alt+E." }
     $Script:Hub.HotNote = New-Label $msg 24 $y 352 36 $FontSmall $UI.Muted
-    [void](Add-HubCtrl $p $Script:Hub.HotNote)
+    [void](Add-HubCtrl $p $Script:Hub.HotNote); $y += 44
+
+    [void](Add-HubCtrl $p (New-Caps "Voice commands" 24 $y)); $y += 22
+    [void](Add-HubCtrl $p (New-HubToggle "Mic on the widget" "VoiceEnabled" 24 $y 352 "Say: start break, back to work, clock in, clock out")); $y += 54
+    $vhot = New-TextBox 24 $y 352 ([string]$Script:Cfg.VoiceHotkey) "Click here, then press your keys"
+    $vhot.ReadOnly = $true; $vhot.BackColor = $UI.Card; $vhot.Cursor = "Hand"
+    $vhot.Add_KeyDown({
+        param($s, $e)
+        $e.SuppressKeyPress = $true; $e.Handled = $true
+        $k = $e.KeyCode.ToString()
+        if ($k -in @("ControlKey", "ShiftKey", "Menu", "LWin", "RWin", "Back", "Delete", "Escape")) { return }
+        $parts = @()
+        if ($e.Control) { $parts += "Ctrl" }
+        if ($e.Alt) { $parts += "Alt" }
+        if ($e.Shift) { $parts += "Shift" }
+        if ($parts.Count -eq 0) { return }
+        $s.Text = (($parts + $k) -join "+")
+        $Script:Cfg.VoiceHotkey = $s.Text; Save-Config; Register-VoiceHotkey
+        $Script:Hub.VoiceNote.Text = if ($Script:VoiceHotStatus) { $Script:VoiceHotStatus } else { "Saved - press it and speak." }
+    })
+    [void](Add-HubCtrl $p $vhot); $y += 34
+    $vmsg = if ($Script:VoiceHotStatus) { $Script:VoiceHotStatus } else { "Press the shortcut (or click the mic), then speak within 5 seconds. Works offline." }
+    $Script:Hub.VoiceNote = New-Label $vmsg 24 $y 352 36 $FontSmall $UI.Muted
+    [void](Add-HubCtrl $p $Script:Hub.VoiceNote)
     return "Advanced"
 }
 
@@ -5581,6 +5819,30 @@ function Register-Hotkey {
             Write-Log "Hotkey $($Script:Cfg.Hotkey) could not be registered"
         }
     } catch { Write-Log "Hotkey setup failed: $($_.Exception.Message)" }
+    finally { Register-VoiceHotkey }
+}
+
+# A second shortcut, for the microphone.
+$Script:VoiceHot = $null
+$Script:VoiceHotStatus = ""
+function Register-VoiceHotkey {
+    if (-not $Script:HasWinApi) { return }
+    try {
+        if (-not $Script:VoiceHot) {
+            $Script:VoiceHot = New-Object EhHotkey
+            $Script:VoiceHot.add_Pressed({ Start-Voice })
+        }
+        $Script:VoiceHot.Unregister()
+        $Script:VoiceHotStatus = ""
+        if (-not $Script:Cfg.VoiceEnabled) { return }
+        $hk = Parse-Hotkey $Script:Cfg.VoiceHotkey
+        if (-not $hk) { $Script:VoiceHotStatus = "Shortcut not valid"; return }
+        if ([string]$Script:Cfg.VoiceHotkey -eq [string]$Script:Cfg.Hotkey -and $Script:Cfg.HotkeyEnabled) { $Script:VoiceHotStatus = "Same as the start / stop shortcut - pick another."; return }
+        if (-not $Script:VoiceHot.Register([uint32]$hk.Mod, [uint32]$hk.Vk)) {
+            $Script:VoiceHotStatus = "$($Script:Cfg.VoiceHotkey) is already used by another app - pick another."
+            Write-Log "Voice hotkey $($Script:Cfg.VoiceHotkey) could not be registered"
+        }
+    } catch { Write-Log "Voice hotkey setup failed: $($_.Exception.Message)" }
 }
 
 # ===========================================================================
@@ -5596,6 +5858,7 @@ $miStart    = $menu.Items.Add("Start a timer...")
 $miResume   = $menu.Items.Add("Resume last task")
 $miStop     = $menu.Items.Add("Stop timer")
 $miClock    = $menu.Items.Add("Clock in")
+$miVoice    = $menu.Items.Add("Voice command...")
 $miFavs     = New-Object System.Windows.Forms.ToolStripMenuItem("Favourites")
 $miFocus    = New-Object System.Windows.Forms.ToolStripMenuItem("Focus")
 [void]$menu.Items.Add($miFavs); [void]$menu.Items.Add($miFocus)
@@ -5635,6 +5898,8 @@ $menu.Add_Opening({
     $miStop.Enabled = $Script:IsRunning
     $miClock.Visible = Test-ClockOn
     $miClock.Text = if ($Script:ClockState -eq "in") { "Clock out" } else { "Clock in" }
+    $miVoice.Visible = [bool]$Script:Cfg.VoiceEnabled
+    $miVoice.Text = "Voice command...   " + [string]$Script:Cfg.VoiceHotkey
     $last = [string]$Script:Cfg.LastTaskName
     $miResume.Visible = (-not $Script:IsRunning) -and [bool]$Script:Cfg.LastTaskId
     if ($last.Length -gt 34) { $last = $last.Substring(0, 33) + "..." }
@@ -5673,6 +5938,7 @@ $miStart.Add_Click({ Show-TaskPicker })
 $miResume.Add_Click({ Resume-LastTask })
 $miStop.Add_Click({ Stop-Timer })
 $miClock.Add_Click({ Toggle-Clock })
+$miVoice.Add_Click({ Start-Voice })
 $miNote.Add_Click({ Show-NoteDialog })
 $miAddTime.Add_Click({ Show-TaskPicker -AddTime })
 $miRefresh.Add_Click({ $Script:RecordsAt = [DateTime]::MinValue; $Script:WeekAt = [DateTime]::MinValue; Request-Poll -Force })
@@ -5779,6 +6045,7 @@ $form.Add_MouseUp({
         "b_stop"     { if ($Script:IsRunning) { Stop-Timer } else { Resume-LastTask } }
         "b_settings" { Show-Settings }
         "b_clock"    { Toggle-Clock }
+        "mic"        { Start-Voice }
         default      { if ($Script:Cfg.Shape -ne "Large") { Set-Expanded (-not $Script:IsExpanded) } }
     }
 })
@@ -5987,6 +6254,8 @@ $form.Add_Shown({
 $form.Add_FormClosing({
     $uiTimer.Stop(); $secTimer.Stop(); $deskTimer.Stop(); $animTimer.Stop(); $Script:JobTimer.Stop()
     try { if ($Script:Hot) { $Script:Hot.Dispose() } } catch { }
+    try { if ($Script:VoiceHot) { $Script:VoiceHot.Dispose() } } catch { }
+    try { if ("EhVoice" -as [type]) { [EhVoice]::Cancel() } } catch { }
     $notify.Visible = $false; $notify.Dispose()
 })
 
