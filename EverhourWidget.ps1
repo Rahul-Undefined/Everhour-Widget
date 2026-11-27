@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.5"
+$Script:Version = "9.6"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -654,6 +654,7 @@ $Script:Defaults = [ordered]@{
     BreakOnLock         = $true   # screen locked while working: break task, back on unlock
     VoiceEnabled        = $true   # mic on the widget + shortcut: spoken commands
     VoiceHotkey         = "Ctrl+Alt+V"
+    VoiceEngine         = "auto"  # auto, sapi (classic) or winrt (Windows 10/11 speech)
     # ...except work that goes on with the laptop locked or shut
     LockKeepWords       = "meeting, call, sync, standup, stand-up, scrum, huddle, interview, training, workshop, webinar, presentation, demo, discussion, 1:1, one-on-one, client visit, site visit, offline"
 }
@@ -894,6 +895,36 @@ if ($Diagnose) {
     if ($procs.Count -eq 0) { Write-Host "    Not running." }
     elseif ($procs.Count -eq 1) { Write-Host "    Running (1 copy, correct)." -ForegroundColor Green }
     else { Write-Host "    Running $($procs.Count) copies - that's a duplicate." -ForegroundColor Yellow }
+    Write-Host ""
+
+    Write-Host "[3b] Voice commands" -ForegroundColor Yellow
+    $voiceOk = $false
+    try {
+        Add-Type -AssemblyName System.Speech -ErrorAction Stop
+        $sapi = @([System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | ForEach-Object { $_.Culture.Name })
+        if ($sapi.Count) { Write-Host "    Classic speech (SAPI): $($sapi -join ', ')" -ForegroundColor Green; $voiceOk = $true }
+        else { Write-Host "    Classic speech (SAPI): none installed" }
+    } catch { Write-Host "    Classic speech (SAPI): not available ($($_.Exception.Message))" }
+    try {
+        $null = [Windows.Media.SpeechRecognition.SpeechRecognizer, Windows.Media.SpeechRecognition, ContentType = WindowsRuntime]
+        $rt = @([Windows.Media.SpeechRecognition.SpeechRecognizer]::SupportedGrammarLanguages | ForEach-Object { $_.LanguageTag })
+        if ($rt.Count) { Write-Host "    Windows speech (OneCore): $($rt -join ', ')" -ForegroundColor Green; $voiceOk = $true }
+        else { Write-Host "    Windows speech (OneCore): no speech pack installed" }
+    } catch { Write-Host "    Windows speech (OneCore): not available" }
+    $cscPath = Join-Path ([System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()) "csc.exe"
+    Write-Host "    .NET compiler for the voice helper: $(if (Test-Path $cscPath) { 'present' } else { 'MISSING' })"
+    $micKeys = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+                 "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone",
+                 "HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged")
+    $micBlocked = $false
+    foreach ($k in $micKeys) { if ((Get-ItemProperty $k -ErrorAction SilentlyContinue).Value -eq "Deny") { $micBlocked = $true } }
+    if ($micBlocked) { Write-Host "    Microphone privacy: BLOCKED for apps - Settings > Privacy > Microphone" -ForegroundColor Red; $voiceOk = $false }
+    else { Write-Host "    Microphone privacy: allowed" }
+    $mics = @(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue | Where-Object { $_.FriendlyName -match 'Microphone|Mic|Headset|Array|Input' } | ForEach-Object { $_.FriendlyName })
+    if ($mics.Count) { Write-Host "    Microphones: $($mics -join '; ')" } else { Write-Host "    Microphones: none found" -ForegroundColor Red; $voiceOk = $false }
+    Write-Host "    Voice shortcut: $($Script:Cfg.VoiceHotkey)  (on: $([bool]$Script:Cfg.VoiceEnabled))"
+    if ($voiceOk) { Write-Host "    VERDICT: voice should work." -ForegroundColor Green }
+    else { Write-Host "    VERDICT: voice can't work yet - see the red lines above. For no speech: Settings > Time & language > Speech > add your language's speech pack." -ForegroundColor Red }
     Write-Host ""
 
     Write-Host "[4] Everhour connection" -ForegroundColor Yellow
@@ -1874,19 +1905,98 @@ public static class EhVoice {
 }
 "@
 
-$Script:VoiceReady = $null        # $null = not tried yet, $true / $false after
-$Script:VoiceMap   = @{}          # spoken phrase -> command
-$Script:VoiceSince = [DateTime]::MinValue
-$Script:LastWork   = $null        # the last non-break task: "back to work" goes there
+# The second engine: Windows 10/11's own (OneCore) speech recogniser, through
+# WinRT. The old SAPI one above only exists on some Windows languages (e.g.
+# English-US); OneCore comes with each language's speech pack (English-India
+# too). Used when SAPI isn't there. A list of phrases keeps it offline - no
+# "online speech" consent needed. Compiled with the .NET csc.exe against the
+# Windows metadata, since Add-Type can't reference .winmd files.
+$Script:VoiceRtSrc = @"
+using System;
+using System.Threading;
+using Windows.Foundation;
+using Windows.Globalization;
+using Windows.Media.SpeechRecognition;
+
+public static class EhVoiceRt {
+    static SpeechRecognizer rec;
+    static string loadedKey = "";
+    public static volatile string State = "idle";      // idle, starting, listening, done, error
+    public static string Text = "", Error = "", Language = "", Status = "";
+    public static double RawConfidence = 0;
+
+    static Language Pick() {
+        Language sys = SpeechRecognizer.SystemSpeechLanguage;
+        foreach (Language l in SpeechRecognizer.SupportedGrammarLanguages) { if (sys != null && l.LanguageTag == sys.LanguageTag) { return l; } }
+        foreach (Language l in SpeechRecognizer.SupportedGrammarLanguages) { if (l.LanguageTag.StartsWith("en", StringComparison.OrdinalIgnoreCase)) { return l; } }
+        foreach (Language l in SpeechRecognizer.SupportedGrammarLanguages) { return l; }
+        return null;
+    }
+    public static bool Available() { try { return Pick() != null; } catch { return false; } }
+
+    static T Wait<T>(IAsyncOperation<T> op) {
+        while (op.Status == AsyncStatus.Started) { Thread.Sleep(25); }
+        if (op.Status == AsyncStatus.Error) { throw new InvalidOperationException(op.ErrorCode.Message, op.ErrorCode); }
+        if (op.Status == AsyncStatus.Canceled) { throw new OperationCanceledException(); }
+        return op.GetResults();
+    }
+
+    public static void Listen(string[] phrases, double seconds, bool sync) {
+        if (State == "listening" || State == "starting") { return; }
+        Text = ""; Error = ""; Status = ""; RawConfidence = 0;
+        State = "starting";
+        if (sync) { Run(phrases, seconds); }
+        else { ThreadPool.QueueUserWorkItem(delegate { Run(phrases, seconds); }); }
+    }
+    static void Run(string[] phrases, double seconds) {
+        try {
+            string key = string.Join("|", phrases);
+            if (rec == null || key != loadedKey) {
+                if (rec != null) { rec.Dispose(); rec = null; }
+                Language l = Pick();
+                if (l == null) { throw new InvalidOperationException("No speech language is installed in Windows."); }
+                rec = new SpeechRecognizer(l);
+                Language = l.LanguageTag;
+                rec.Constraints.Add(new SpeechRecognitionListConstraint(phrases, "commands"));
+                SpeechRecognitionCompilationResult cr = Wait(rec.CompileConstraintsAsync());
+                if (cr.Status != SpeechRecognitionResultStatus.Success) { throw new InvalidOperationException("Speech setup failed: " + cr.Status); }
+                loadedKey = key;
+            }
+            rec.Timeouts.InitialSilenceTimeout = TimeSpan.FromSeconds(seconds);
+            rec.Timeouts.BabbleTimeout = TimeSpan.FromSeconds(seconds);
+            rec.Timeouts.EndSilenceTimeout = TimeSpan.FromMilliseconds(450);
+            State = "listening";
+            SpeechRecognitionResult r = Wait(rec.RecognizeAsync());
+            Status = r.Status.ToString() + "/" + r.Confidence.ToString();
+            if (r.Status == SpeechRecognitionResultStatus.Success && r.Confidence != SpeechRecognitionConfidence.Rejected) {
+                Text = r.Text; RawConfidence = r.RawConfidence;
+            }
+            State = "done";
+        } catch (Exception ex) { Error = ex.Message; State = "error"; }
+    }
+    public static void Cancel() { try { if (rec != null && State == "listening") { IAsyncAction a = rec.StopRecognitionAsync(); } } catch { } }
+    public static void Reset() { State = "idle"; }
+}
+"@
+
+$Script:VoiceReady   = $null      # SAPI loaded: $null = not tried yet
+$Script:VoiceRtReady = $null      # OneCore loaded
+$Script:VoiceEngine  = ""         # "sapi", "winrt" or "none"
+$Script:VoiceMap     = @{}        # spoken phrase -> command
+$Script:VoiceSince   = [DateTime]::MinValue
+$Script:LastWork     = $null      # the last non-break task: "back to work" goes there
+
+function Get-SrcHash([string]$src) {
+    $sha = [Security.Cryptography.SHA1]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($src + $PSVersionTable.CLRVersion))) -replace "-", "").Substring(0, 12)
+}
 
 function Import-Voice {
     if ($null -ne $Script:VoiceReady) { return $Script:VoiceReady }
     $Script:VoiceReady = $false
     try {
         if (-not ("EhVoice" -as [type])) {
-            $sha = [Security.Cryptography.SHA1]::Create()
-            $hash = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Script:VoiceSrc + $PSVersionTable.CLRVersion))) -replace "-", "").Substring(0, 12)
-            $dll = Join-Path $ConfigDir "EhVoice-$hash.dll"
+            $dll = Join-Path $ConfigDir "EhVoice-$(Get-SrcHash $Script:VoiceSrc).dll"
             if (-not (Test-Path $dll)) {
                 Add-Type -TypeDefinition $Script:VoiceSrc -ReferencedAssemblies System.Speech -OutputAssembly $dll -OutputType Library -ErrorAction Stop
                 Get-ChildItem $ConfigDir -Filter "EhVoice-*.dll" | Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
@@ -1894,9 +2004,86 @@ function Import-Voice {
             Add-Type -Path $dll -ErrorAction Stop
         }
         $Script:VoiceReady = [bool][EhVoice]::Available()
-        if (-not $Script:VoiceReady) { Write-Log "Voice: no speech recogniser installed" }
-    } catch { Write-Log "Voice unavailable: $($_.Exception.Message)" }
+    } catch { Write-Log "Voice (SAPI) unavailable: $($_.Exception.Message)" }
     return $Script:VoiceReady
+}
+
+function Import-VoiceRt {
+    if ($null -ne $Script:VoiceRtReady) { return $Script:VoiceRtReady }
+    $Script:VoiceRtReady = $false
+    try {
+        if (-not ("EhVoiceRt" -as [type])) {
+            $dll = Join-Path $ConfigDir "EhVoiceRt-$(Get-SrcHash $Script:VoiceRtSrc).dll"
+            if (-not (Test-Path $dll)) {
+                $fw = [System.Runtime.InteropServices.RuntimeEnvironment]::GetRuntimeDirectory()
+                $md = Join-Path $env:WINDIR "System32\WinMetadata"
+                $refs = @((Join-Path $md "Windows.Media.winmd"), (Join-Path $md "Windows.Foundation.winmd"), (Join-Path $md "Windows.Globalization.winmd"), (Join-Path $fw "System.Runtime.dll"))
+                foreach ($r in $refs) { if (-not (Test-Path $r)) { throw "missing $r" } }
+                $src = Join-Path $env:TEMP ("everhour-widget-voice-" + [guid]::NewGuid().ToString("N") + ".cs")
+                [IO.File]::WriteAllText($src, $Script:VoiceRtSrc)
+                $psi = New-Object System.Diagnostics.ProcessStartInfo (Join-Path $fw "csc.exe")
+                $psi.Arguments = "/nologo /target:library /out:`"$dll`" " + (($refs | ForEach-Object { "/r:`"$_`"" }) -join " ") + " `"$src`""
+                $psi.CreateNoWindow = $true; $psi.UseShellExecute = $false; $psi.RedirectStandardOutput = $true
+                $pr = [System.Diagnostics.Process]::Start($psi)
+                $outp = $pr.StandardOutput.ReadToEnd(); $pr.WaitForExit()
+                Remove-Item $src -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path $dll)) { throw "compile failed: $(($outp -split "`n" | Where-Object { $_ -match 'error' } | Select-Object -First 2) -join ' ')" }
+                Get-ChildItem $ConfigDir -Filter "EhVoiceRt-*.dll" | Where-Object { $_.FullName -ne $dll } | Remove-Item -Force -ErrorAction SilentlyContinue
+            }
+            Add-Type -Path $dll -ErrorAction Stop
+        }
+        $Script:VoiceRtReady = [bool][EhVoiceRt]::Available()
+    } catch { Write-Log "Voice (Windows speech) unavailable: $($_.Exception.Message)" }
+    return $Script:VoiceRtReady
+}
+
+# Pick the engine once: SAPI where it exists (tested best), else OneCore.
+function Get-VoiceEngine {
+    if ($Script:VoiceEngine) { return $Script:VoiceEngine }
+    # config "VoiceEngine": auto (default), sapi or winrt - to force one if a PC's copy misbehaves
+    $pref = [string]$Script:Cfg.VoiceEngine
+    if ($pref -eq "winrt" -and (Import-VoiceRt)) { $Script:VoiceEngine = "winrt" }
+    elseif ($pref -ne "winrt" -and (Import-Voice)) { $Script:VoiceEngine = "sapi" }
+    elseif (Import-VoiceRt) { $Script:VoiceEngine = "winrt" }
+    elseif (Import-Voice) { $Script:VoiceEngine = "sapi" }
+    else { $Script:VoiceEngine = "none" }
+    $lang = switch ($Script:VoiceEngine) { "sapi" { [EhVoice]::Culture } "winrt" { "" } default { "" } }
+    Write-Log "Voice engine: $($Script:VoiceEngine) $lang"
+    return $Script:VoiceEngine
+}
+
+function Get-VoiceState {
+    switch ($Script:VoiceEngine) {
+        "sapi"  { return [string][EhVoice]::State }
+        "winrt" { return [string][EhVoiceRt]::State }
+    }
+    return "idle"
+}
+function Test-VoiceListening { return ((Get-VoiceState) -in @("listening", "starting")) }
+
+# Windows privacy switch: "Let desktop apps access your microphone".
+function Test-MicBlocked {
+    try {
+        $base = "Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
+        foreach ($k in @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone", "HKCU:\$base", "HKCU:\$base\NonPackaged")) {
+            $v = (Get-ItemProperty $k -ErrorAction SilentlyContinue).Value
+            if ($v -eq "Deny") { return $true }
+        }
+    } catch { }
+    return $false
+}
+
+# Turn an engine's error into something a person can act on.
+function Show-VoiceProblem([string]$err) {
+    Write-Log "Voice ($($Script:VoiceEngine)): $err"
+    if ($err -match 'privacy|access is denied|0x80070005|0x80045509|permission') {
+        Set-Toast "Microphone blocked by Windows" 5 -IsError
+        Show-Balloon "Microphone is off for apps" "Click here, then turn on 'Microphone access' and 'Let desktop apps access your microphone'." "micsettings"
+    } elseif ($err -match 'audio|device|input|microphone|0x8004503a|0x80045054') {
+        Set-Toast "No microphone found" 5 -IsError
+    } else {
+        Set-Toast "Voice error - see Troubleshoot" 5 -IsError
+    }
 }
 
 # Every phrase the recogniser may hear, and what it means.
@@ -1920,13 +2107,28 @@ function Get-VoicePhrases {
 
 function Start-Voice {
     if (-not $Script:Cfg.VoiceEnabled) { Set-Toast "Voice is off in Settings" 3; return }
-    if (-not (Import-Voice)) { Set-Toast "Voice isn't available on this PC" 5 -IsError; return }
-    if ([EhVoice]::State -eq "listening") { [EhVoice]::Cancel(); return }      # second press: stop listening
+    if (Test-MicBlocked) {
+        Set-Toast "Microphone blocked by Windows" 5 -IsError
+        Show-Balloon "Microphone is off for apps" "Click here, then turn on 'Microphone access' and 'Let desktop apps access your microphone'." "micsettings"
+        return
+    }
+    $eng = Get-VoiceEngine
+    if ($eng -eq "none") {
+        Set-Toast "Windows speech isn't installed" 5 -IsError
+        Show-Balloon "Voice needs Windows speech" "Click here: Speech settings > add your language's speech pack (e.g. English). Then try the mic again." "speechsettings"
+        return
+    }
+    if (Test-VoiceListening) {          # second press: stop listening
+        if ($eng -eq "sapi") { [EhVoice]::Cancel() } else { [EhVoiceRt]::Cancel() }
+        return
+    }
     $Script:VoiceMap = Get-VoicePhrases
-    [EhVoice]::Listen([string[]]@($Script:VoiceMap.Keys), 5)
-    if ([EhVoice]::State -eq "error") {
-        Write-Log "Voice: $([EhVoice]::Error)"
-        Set-Toast "Microphone not available" 5 -IsError; [EhVoice]::Reset(); return
+    $phrases = [string[]]@($Script:VoiceMap.Keys)
+    if ($eng -eq "sapi") { [EhVoice]::Listen($phrases, 5) } else { [EhVoiceRt]::Listen($phrases, 5, $false) }   # OneCore: on a pool thread
+    if ((Get-VoiceState) -eq "error") {
+        $err = if ($eng -eq "sapi") { [EhVoice]::Error } else { [EhVoiceRt]::Error }
+        if ($eng -eq "sapi") { [EhVoice]::Reset() } else { [EhVoiceRt]::Reset() }
+        Show-VoiceProblem $err; return
     }
     $Script:VoiceSince = Get-Date
     Play-Sound "soft"
@@ -1938,16 +2140,25 @@ function Start-Voice {
 $voiceTimer = New-Object System.Windows.Forms.Timer
 $voiceTimer.Interval = 100
 $voiceTimer.Add_Tick({
-    if (-not ("EhVoice" -as [type])) { $this.Stop(); return }
-    $st = [EhVoice]::State
-    if ($st -eq "listening") {
-        if (((Get-Date) - $Script:VoiceSince).TotalSeconds -gt 12) { [EhVoice]::Cancel() }   # safety net
+    $eng = $Script:VoiceEngine
+    if ($eng -notin @("sapi", "winrt")) { $this.Stop(); return }
+    $st = Get-VoiceState
+    if ($st -in @("listening", "starting")) {
+        if (((Get-Date) - $Script:VoiceSince).TotalSeconds -gt 15) { if ($eng -eq "sapi") { [EhVoice]::Cancel() } else { [EhVoiceRt]::Cancel() } }   # safety net
         Render; return
     }
     $this.Stop()
-    $text = [string][EhVoice]::Text; $conf = [double][EhVoice]::Confidence; $err = [string][EhVoice]::Error
-    [EhVoice]::Reset()
-    if ($st -eq "error") { Write-Log "Voice: $err"; Set-Toast "Microphone not available" 5 -IsError; return }
+    if ($eng -eq "sapi") {
+        $text = [string][EhVoice]::Text; $conf = [double][EhVoice]::Confidence; $err = [string][EhVoice]::Error; [EhVoice]::Reset()
+    } else {
+        # OneCore grades High / Medium / Low; map to the same 0-1 scale
+        $text = [string][EhVoiceRt]::Text; $err = [string][EhVoiceRt]::Error
+        $grade = ([string][EhVoiceRt]::Status -split "/")[-1]
+        $conf = switch ($grade) { "High" { 0.9 } "Medium" { 0.75 } "Low" { 0.55 } default { 0.0 } }
+        [EhVoiceRt]::Reset()
+    }
+    Render
+    if ($st -eq "error") { Show-VoiceProblem $err; return }
     if (-not $text) { Set-Toast "Didn't hear a command" 3; return }
     $cmd = [string]$Script:VoiceMap[$text]
     # clocking out needs a clearer word than the rest
@@ -1955,7 +2166,6 @@ $voiceTimer.Add_Tick({
     if ($conf -lt $need) { Set-Toast "Didn't catch that - try again" 3; Write-Log ("Voice: heard '{0}' at {1:N2}, too unsure" -f $text, $conf); return }
     Invoke-VoiceCommand $cmd $text
 })
-
 function Invoke-VoiceCommand([string]$cmd, [string]$heard) {
     switch -Wildcard ($cmd) {
         "break" {
@@ -3422,7 +3632,7 @@ function Build-Frame($Pal, [string]$Mode) {
     if ($square) { $pillR = $btnX - (Px 8); $pcy = $btnY + $btnD / 2 }
     else { $pillR = $line1[0] + $line1[2]; $pcy = $line1[1] + $hT / 2 }
     $pillX = $pillR - $pillW; $pillY = $pcy - $pillH / 2
-    $listening = ($cfg.VoiceEnabled -and $Script:VoiceSince -gt [DateTime]::MinValue -and ("EhVoice" -as [type]) -and [EhVoice]::State -eq "listening")
+    $listening = ($cfg.VoiceEnabled -and $Script:VoiceSince -gt [DateTime]::MinValue -and (Test-VoiceListening))
     Fill-Round $g (A $Pal.Muted $(if ($listening) { 60 } else { 34 })) $pillX $pillY $pillW $pillH ($pillH / 2)
     $es = [single](Px 7)
     for ($si = 0; $si -lt $slots.Count; $si++) {
@@ -6174,6 +6384,8 @@ $notify.Add_BalloonTipClicked({
         "key"    { Change-ApiKey | Out-Null }
         "update" { Install-Update }
         "focus"  { Start-Focus 0 }
+        "micsettings"    { try { Start-Process "ms-settings:privacy-microphone" } catch { } }
+        "speechsettings" { try { Start-Process "ms-settings:speech" } catch { } }
     }
 })
 $notify.Add_BalloonTipClosed({ $notify.Visible = $false })
@@ -6350,6 +6562,7 @@ $form.Add_FormClosing({
     try { if ($Script:Hot) { $Script:Hot.Dispose() } } catch { }
     try { if ($Script:VoiceHot) { $Script:VoiceHot.Dispose() } } catch { }
     try { if ("EhVoice" -as [type]) { [EhVoice]::Cancel() } } catch { }
+    try { if ("EhVoiceRt" -as [type]) { [EhVoiceRt]::Cancel() } } catch { }
     $notify.Visible = $false; $notify.Dispose()
 })
 

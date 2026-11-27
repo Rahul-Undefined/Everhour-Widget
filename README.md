@@ -70,7 +70,7 @@ If you use Everhour timecards, the widget clocks you in and out: the **Clock in 
 - **Global shortcut** — `Ctrl+Alt+E` starts or stops the timer from anywhere
 - **Win+R → `Everhour`** — opens the widget, or brings it to the front if it's already running
 - **Comment from the widget** — the speech bubble next to the mic adds or changes the comment on the running entry, posted to Everhour (filled when there is one; hover to read it)
-- **Voice commands** — click the mic on the widget or press `Ctrl+Alt+V` and say *start break*, *back to work*, *clock in*, *clock out*, *stop timer*, *start timer* or *start &lt;favourite task&gt;*. Uses the speech recogniser built into Windows, offline; the microphone is on only for five seconds after you ask (Settings → Advanced)
+- **Voice commands** — click the mic on the widget or press `Ctrl+Alt+V` and say *start break*, *back to work*, *clock in*, *clock out*, *stop timer*, *start timer* or *start &lt;favourite task&gt;*. Uses the speech recogniser built into Windows, offline — the classic one where it exists, otherwise Windows 10/11's own speech (so English-India and other Windows languages work too); the microphone is on only for five seconds after you ask (Settings → Advanced). If it doesn't work, *Troubleshoot.bat* says why: microphone blocked for desktop apps, or no speech pack installed
 - **Stays on Show desktop** — Win+D or the taskbar corner don't hide it (Settings → Widget)
 - **Real-time timer** — synced to Everhour's clock (network delay is taken out), refreshed every 10 s by default
 - **Hidden from screen sharing** — Teams, Zoom, Meet and screenshots don't see it

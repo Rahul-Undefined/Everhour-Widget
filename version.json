@@ -1,4 +1,4 @@
 {
-  "version": "9.5",
-  "notes": "Going back to a task no longer restarts the timer at 0: the big timer shows the task's whole day, like Everhour, and 'session' shows the current run. Also: voice commands and comments from the widget."
+  "version": "9.6",
+  "notes": "Voice now works on more PCs: if the classic Windows speech engine is missing (e.g. English-India Windows), the widget uses Windows 10/11's own speech. Clear messages when the microphone is blocked or speech isn't installed; Troubleshoot checks voice too."
 }

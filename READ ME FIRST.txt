@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v9.5)
+EVERHOUR DESKTOP WIDGET  (v9.6)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
@@ -67,7 +67,11 @@ USING IT
   Ctrl+Alt+V / mic   voice: say "start break", "back to work", "clock in",
                      "clock out", "stop timer", "start timer" or
                      "start <favourite task>". Offline; the mic is on only
-                     for 5 seconds after you ask (Settings -> Advanced)
+                     for 5 seconds after you ask (Settings -> Advanced).
+                     Not working? Run Troubleshoot.bat - section [3b] says why:
+                     microphone blocked (Settings > Privacy > Microphone >
+                     allow desktop apps) or no speech pack (Settings > Time &
+                     language > Speech > add your language).
 
 
 CLOCK IN AND CLOCK OUT  (Everhour timecards)
