@@ -13,7 +13,7 @@ No admin rights. One PowerShell script, a few launchers and some open-source fon
 
 | | |
 | --- | --- |
-| <img src="docs/wide-running.png" width="300"> | **Working** — your theme. The dots round the edge fill up once a minute, Nothing-phone style. |
+| <img src="docs/wide-running.png" width="300"> | **Working** — your theme. The big timer is the task's whole day, the same as Everhour; come back to a task and it carries on from there, with **session** showing this run on its own. The dots round the edge fill up once a minute, Nothing-phone style. |
 | <img src="docs/wide-break.png" width="300"> | **On a break** — calm teal gradient with a steaming cup. The bar shows how much of today's break allowance is used. |
 | <img src="docs/wide-overbreak.png" width="300"> | **Break over the limit** — fast red-orange gradient, chasing lights and warning stripes. |
 | <img src="docs/wide-stopped.png" width="300"> | **No timer running** — the whole widget turns red, a red dot circles the edge, and the timer counts how long you've been off. |

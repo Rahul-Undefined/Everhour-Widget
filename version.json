@@ -1,4 +1,4 @@
 {
-  "version": "9.4",
-  "notes": "Voice commands (mic or Ctrl+Alt+V: start break, back to work, clock in, clock out). Comment on the running entry straight from the widget - posted to Everhour. Comment, mic and privacy now sit in one tidy pill, clear of the edge lights in every shape."
+  "version": "9.5",
+  "notes": "Going back to a task no longer restarts the timer at 0: the big timer shows the task's whole day, like Everhour, and 'session' shows the current run. Also: voice commands and comments from the widget."
 }

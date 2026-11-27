@@ -1,4 +1,4 @@
-EVERHOUR DESKTOP WIDGET  (v9.4)
+EVERHOUR DESKTOP WIDGET  (v9.5)
 ===============================
 
 Shows the Everhour task you are tracking, live, on your desktop.
@@ -35,8 +35,10 @@ only on your PC.
 
 WHAT THE COLOURS MEAN
 ---------------------
-  Your theme colour    a timer is running. The dots round the edge fill up
-                       once a minute.
+  Your theme colour    a timer is running. The big timer is the task's whole
+                       day (as in Everhour); "session" is this run on its own,
+                       shown when you came back to a task. The dots round the
+                       edge fill up once a minute.
   Teal, with a cup     you're on a break (a task whose name contains
                        "break" or "lunch" - change the words in Settings).
                        The bar shows how much of your daily break is used.

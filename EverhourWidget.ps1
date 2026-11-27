@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Security
 
-$Script:Version = "9.4"
+$Script:Version = "9.5"
 
 $ConfigDir    = Join-Path $env:APPDATA "EverhourWidget"
 $ConfigPath   = Join-Path $ConfigDir "config.json"
@@ -1191,10 +1191,18 @@ function Get-LiveElapsed {
     if (-not $Script:IsRunning) { return 0 }
     return $Script:BaseDuration + ((Get-Date) - $Script:LastPollAt).TotalSeconds
 }
+# The running task's whole day = what it had before this session + the
+# session. Checked against the live API: timer.today and the saved entries
+# both leave the running session out (today=0, no entries, while a 23-min
+# session ran), so the two are added - not max()ed, which made a task you
+# came back to restart from 0:00 while Everhour kept the full day.
+function Get-TaskEarlier {
+    if (-not $Script:IsRunning) { return 0 }
+    return [Math]::Max([double]$Script:TimerToday, (Get-RecordedForTask $Script:TaskId))
+}
 function Get-LiveTaskToday {
     if (-not $Script:IsRunning) { return 0 }
-    $live = $Script:TimerToday + ((Get-Date) - $Script:LastPollAt).TotalSeconds
-    return [Math]::Max($live, (Get-LiveElapsed))
+    return (Get-TaskEarlier) + (Get-LiveElapsed)
 }
 function Get-RecordedForTask([string]$id) {
     if ($id -and $Script:TodayByTask.ContainsKey($id)) { return [double]$Script:TodayByTask[$id].Sec }
@@ -3008,7 +3016,7 @@ function Build-Peek($Pal, [string]$Mode) {
         $a = 60
         switch ($Mode) {
             { $_ -eq "work" -or $_ -eq "break" } {
-                $el = Get-LiveElapsed
+                $el = Get-LiveTaskToday     # ring follows the big number
                 $on = ($i -lt [Math]::Ceiling(($el % 60) / 60.0 * $n))
                 if ([int][Math]::Floor($el / 60) % 2 -eq 1) { $on = -not $on }     # alternate laps, no jump at :00
                 if ($on) { $a = 240 }
@@ -3105,7 +3113,7 @@ function Draw-EdgeLights($g, $pal, [string]$mode, [single]$W, [single]$H, [singl
             # behind the head, so the motion never jumps back to empty at :00.
             # In a focus session (or its break) the ring shows the time left
             # draining away instead.
-            $el = Get-LiveElapsed
+            $el = Get-LiveTaskToday     # ring follows the big number
             $lit = ($el % 60) / 60.0 * $n
             $fillLap = ([int][Math]::Floor($el / 60) % 2 -eq 0)
             if (($mode -eq "work" -and $Script:FocusPhase -eq "focus") -or ($mode -eq "break" -and $Script:FocusPhase -eq "rest")) {
@@ -3485,7 +3493,14 @@ function Build-Frame($Pal, [string]$Mode) {
 
     $timeText = Format-HMS 0
     $timeC = A $Pal.Time 115
-    if ($Script:IsRunning) { $timeText = Format-HMS (Get-LiveElapsed); $timeC = $Pal.Time }
+    # Running: the big number is the task's whole day (what Everhour shows),
+    # and "session" shows this run on its own - only when the two differ,
+    # i.e. you came back to a task that already had time today.
+    $sessText = ""
+    if ($Script:IsRunning) {
+        $timeText = Format-HMS (Get-LiveTaskToday); $timeC = $Pal.Time
+        if ((Get-TaskEarlier) -ge 30) { $sessText = Hide-Num (Format-HMS (Get-LiveElapsed)) }
+    }
     elseif ($stoppedShow) { $timeText = Format-HMS (($now - $offSince).TotalSeconds); $timeC = $Pal.Time }
     if ($cfg.PrivacyMode) {
         if ($Script:TaskName -and $l1 -eq $Script:TaskName) { $l1 = Hide-Name $l1 }
@@ -3521,18 +3536,40 @@ function Build-Frame($Pal, [string]$Mode) {
         if ($stoppedShow -and -not $hovBtn) { $l1 = Hide-Num ("Off since " + $offSince.ToString("h:mm tt")) }
         Draw-Text $g $l1 $l1F $l1C $line1[0] $line1[1] $line1[2] $line1[3] "Left"
         Draw-Text $g $timeText $timeFont $timeC $timeRect[0] $timeRect[1] $timeRect[2] $timeRect[3] "Left"
+        $rowW = $W - 2 * $P
+        # this session, right-aligned on the day row: "session 0:12:03",
+        # or just "now 0:12:03" when the row is tight
+        $sessW = 0; $sessLbl = ""
+        if ($sessText) {
+            $sv = Measure-W $sessText $F.SmallBold
+            $sessLbl = "session "; $sessW = (Measure-W $sessLbl $F.Small) + $sv
+        }
         if ($showToday -or $isBreak) {
-            $main = ""; $suffix = ""
-            if ($Mode -eq "overbreak") { $main = "+" + (Format-Short ($breakSec - $limit)); $suffix = "  over break" }
-            elseif ($isBreak) { $main = Format-Short $breakSec; $suffix = "  of " + (Format-Short $limit) + " break" }
+            $main = ""; $suffix = ""; $short = ""
+            if ($Mode -eq "overbreak") { $main = "+" + (Format-Short ($breakSec - $limit)); $suffix = "  over break"; $short = " over" }
+            elseif ($isBreak) { $main = Format-Short $breakSec; $suffix = "  of " + (Format-Short $limit) + " break"; $short = " / " + (Format-Short $limit) }
             else {
                 $main = if ($hasToday) { Format-Short $today } else { "--" }
                 $suffix = if ($target -gt 0) { "  of " + (Format-Target $target) + " today" } else { "  today" }
+                $short = if ($target -gt 0) { " / " + (Format-Target $target) } else { "" }
             }
-            $main = Hide-Num $main; $suffix = Hide-Num $suffix
+            $main = Hide-Num $main; $suffix = Hide-Num $suffix; $short = Hide-Num $short
             $mw = Measure-W $main $F.SmallBold
+            $gapS = [single](Px 10)
+            if ($sessText) {
+                # make room: shorter day suffix first, then the shorter label
+                if ($mw + (Measure-W $suffix $F.Small) + $gapS + $sessW -gt $rowW) { $suffix = $short }
+                if ($mw + (Measure-W $suffix $F.Small) + $gapS + $sessW -gt $rowW) { $sessLbl = "now "; $sessW = (Measure-W $sessLbl $F.Small) + (Measure-W $sessText $F.SmallBold) }
+                if ($mw + (Measure-W $suffix $F.Small) + $gapS + $sessW -gt $rowW) { $suffix = "" }
+            }
             Draw-Text $g $main $F.SmallBold $Pal.Task $P $todayY ($mw + (Px 2)) $hS "Left"
-            Draw-Text $g $suffix $F.Small $Pal.Muted ($P + $mw) $todayY ($W - 2 * $P - $mw) $hS "Left"
+            Draw-Text $g $suffix $F.Small $Pal.Muted ($P + $mw) $todayY ($rowW - $mw - $sessW) $hS "Left"
+        }
+        if ($sessText) {
+            $sv = Measure-W $sessText $F.SmallBold
+            Draw-Text $g $sessText $F.SmallBold $Pal.Accent ($W - $P - $sv) $todayY ($sv + (Px 2)) $hS "Right"
+            $lw = Measure-W $sessLbl $F.Small
+            Draw-Text $g $sessLbl $F.Small $Pal.Muted ($W - $P - $sv - $lw) $todayY ($lw + (Px 1)) $hS "Right"
         }
     } else {
         $lineR = $quickLeft - (Px 8)       # task name and chip stop before the control pill
@@ -3572,9 +3609,20 @@ function Build-Frame($Pal, [string]$Mode) {
         }
     }
 
+    # ---------- Wide: this session at the right end of the bar row ----------
+    $barCut = [single]0
+    if (-not $square -and $sessText) {
+        $sv = Measure-W $sessText $F.SmallBold
+        $lbl = "session "; $lw = Measure-W $lbl $F.Small
+        $sy = $barY + (Px 2) - $hS / 2
+        Draw-Text $g $sessText $F.SmallBold $Pal.Accent ($W - $P - $sv) $sy ($sv + (Px 2)) $hS "Right"
+        Draw-Text $g $lbl $F.Small $Pal.Muted ($W - $P - $sv - $lw) $sy ($lw + (Px 1)) $hS "Right"
+        $barCut = $sv + $lw + (Px 10)
+    }
+
     # ---------- progress bar: day target, or break allowance ----------
     if ($showBar) {
-        $bx = $P; $bwid = $W - 2 * $P; $bhgt = [single](Px 4)
+        $bx = $P; $bwid = $W - 2 * $P - $barCut; $bhgt = [single](Px 4)
         Fill-Round $g (A $Pal.Muted 60) $bx $barY $bwid $bhgt ($bhgt / 2)
         $frac = 0.0
         if ($isBreak) { $frac = [Math]::Min(1.0, $breakSec / [Math]::Max(1, $limit)) }
